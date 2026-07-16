@@ -1,6 +1,7 @@
-// os-cli: branded system TUI (aliased to the os-release NAME, e.g. `falcos`).
-// No args: system panel + recipe menu. With args: runs that recipe in the
-// TUI's output pane. Non-TTY invocations pass through to plain `just`.
+// falcos-cli: an OS TUI for system info and running just recipes (aliased to
+// the os-release NAME, e.g. `falcos`). No args: system panel + recipe menu.
+// With args: runs that recipe in the TUI's output pane. Non-TTY invocations
+// pass through to plain `just`.
 package main
 
 import (

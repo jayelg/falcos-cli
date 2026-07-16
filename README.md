@@ -1,8 +1,9 @@
 # falcos-cli
 
-A branded system TUI for [falcos](https://github.com/jayelg/falcos) and other
-bootc images. Run it with no arguments for a system panel plus a menu of the
-image's `just` recipes; pass a recipe name to run one directly.
+An OS TUI for system info and running `just` recipes, for
+[falcos](https://github.com/jayelg/falcos) and other bootc images. Run it with
+no arguments for a system panel plus a menu of the image's `just` recipes; pass
+a recipe name to run one directly.
 
 It is aliased to the OS name in the image (so on falcos you type `falcos`), read
 from `/etc/os-release` so the command follows a rebrand.
