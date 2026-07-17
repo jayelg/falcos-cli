@@ -146,6 +146,12 @@ func (r *runner) enterHandover(prog *tea.Program) {
 	prog.Send(handoverDoneMsg{})
 }
 
+// resizePTY resizes the PTY and emulator to the given dimensions.
+func (r *runner) resizePTY(w, h int) {
+	pty.Setsize(r.ptmx, &pty.Winsize{Rows: uint16(h), Cols: uint16(w)}) //nolint:errcheck
+	r.emu.Resize(w, h)
+}
+
 func (r *runner) kill() {
 	if r.cmd != nil && r.cmd.Process != nil {
 		r.cmd.Process.Kill() //nolint:errcheck

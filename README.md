@@ -107,6 +107,28 @@ install-package PACKAGE:
     falcos-progress 100 "Done!"
 ```
 
+### 5. Silent execution
+
+Add a `[silent]` attribute to suppress the CLI overlay during execution.
+Recipes that produce no useful terminal output (reboot, shutdown) benefit
+most. The recipe status line appears above the menu and the menu stays
+visible.
+
+```just
+[silent]
+[confirm("Reboot now?")]
+reboot:
+    systemctl reboot
+```
+
+When combined with other attributes, `[silent]` takes effect only during
+the execution phase. Parameters and confirmation still show their UI.
+
+| Attribute   | Effect                                        |
+|-------------|-----------------------------------------------|
+| `[silent]`  | CLI overlay hidden; status + menu visible     |
+| (none)      | CLI overlay shown during execution (default)  |
+
 ### Flow summary
 
 ```
@@ -120,13 +142,17 @@ User selects recipe
 │                         ↓
 └── Yes ←──────────────┘  No → return to menu
   ↓
-Recipe starts in PTY pane
+┌─ [silent]? ──→ Status line + menu stay visible
+│                 (no CLI overlay)
+└── No ←───────┘
   ↓
-┌─ [progress]? ──→ Progress bar rendered from OSC 9;4 sequences
+Recipe starts in PTY pane (CLI overlay)
+  ↓
+┌─ [progress]? ──→ Progress bar rendered below CLI output
 │                    (falcos-progress helper)
 └── No ←────────┘
   ↓
-Recipe exits → show exit code + return to menu
+Recipe exits → exit status + return to menu
 ```
 
 ## Template justfile

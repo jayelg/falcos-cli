@@ -14,6 +14,7 @@ type recipe struct {
 	Params   []string
 	Confirm  string              // confirmation prompt; empty = no confirmation needed
 	Progress bool                // recipe emits OSC 9;4 progress sequences
+	Silent   bool                // suppress CLI overlay during execution
 	Select   map[string][]string // parameter name -> selectable options, empty = freeform text
 }
 
@@ -132,6 +133,9 @@ func loadRecipes(justfile string) ([]recipe, error) {
 					}
 					if prog, ok := m["progress"].(bool); ok && prog {
 						rec.Progress = true
+					}
+					if silent, ok := m["silent"].(bool); ok && silent {
+						rec.Silent = true
 					}
 					if sel, ok := m["select"].(string); ok && sel != "" {
 						// Format: "param:opt1|opt2|opt3"

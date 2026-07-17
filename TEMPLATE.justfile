@@ -51,6 +51,23 @@ update:
     "$prog" clear
     echo "Done."
 
+# ─── Pattern: Silent ─────────────────────────────────────
+# [silent] tells the TUI not to show the CLI overlay during
+# execution. Use for recipes that produce no useful terminal
+# output, such as one-shot system commands (reboot, shutdown).
+
+[group('Power')]
+[silent]
+[confirm("Reboot now?")]
+reboot:
+    systemctl reboot
+
+[group('Power')]
+[silent]
+[confirm("Shut down now?")]
+shutdown:
+    systemctl poweroff
+
 # ─── Pattern: Confirm ────────────────────────────────────
 # [confirm("prompt")] shows a Proceed/Cancel popup before
 # the recipe starts. Supports {{param}} placeholders.

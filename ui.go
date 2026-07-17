@@ -11,8 +11,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-const paneHeight = 14
-
 type uiState int
 
 const (
@@ -29,10 +27,9 @@ var (
 	dimColor   = lipgloss.AdaptiveColor{Light: "245", Dark: "240"}
 	titleStyle = lipgloss.NewStyle().Bold(true).Foreground(accent)
 	labelStyle = lipgloss.NewStyle().Foreground(accent).Width(12)
-	groupStyle = lipgloss.NewStyle().Bold(true).Foreground(dimColor).MarginTop(1)
+	groupStyle = lipgloss.NewStyle().Bold(true).Foreground(dimColor)
 	selStyle   = lipgloss.NewStyle().Foreground(accent).Bold(true)
 	docStyle   = lipgloss.NewStyle().Foreground(dimColor)
-	paneStyle  = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(dimColor).Padding(0, 1)
 	helpStyle  = lipgloss.NewStyle().Foreground(dimColor)
 	okStyle    = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "28", Dark: "10"})
 	errStyle   = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "124", Dark: "9"})
@@ -40,16 +37,46 @@ var (
 
 type infoMsg []infoField
 
+// publicIPCmd fetches the public IP asynchronously so it does not
+// block the fastfetch panel load. Always returns a message so the
+// "Loading..." placeholder gets replaced.
+func publicIPCmd() tea.Cmd {
+	return func() tea.Msg {
+		ip := publicIP()
+		if ip == "" {
+			ip = "n/a"
+		}
+		return infoField{"Public IP", ip}
+	}
+}
+
+// ── menu items ────────────────────────────────────────────────
+
+type itemKind int
+
+const (
+	kindHeader itemKind = iota
+	kindRecipe
+	kindExit
+)
+
+type menuItem struct {
+	kind   itemKind
+	recipe recipe   // populated for kindRecipe
+	group  string   // populated for kindHeader
+}
+
+// ── model ─────────────────────────────────────────────────────
+
 type model struct {
 	state    uiState
 	fields   []infoField
 	recipes  []recipe
-	cursor   int
-	width    int
-	height   int
 	run      *runner
 	running  string // recipe name being/last run
 	exitCode int
+	width    int
+	height   int
 	prog     progress.Model
 	progPct  int
 	progOn   bool
@@ -64,8 +91,12 @@ type model struct {
 	spinOn  bool          // spinner currently rendering
 	seenOut bool          // first output or progress received, hide spinner
 
-	selOpts  []string // selectable options for the active parameter
-	selCur   int      // cursor into selOpts
+	selOpts []string // selectable options for the active parameter
+	selCur  int      // cursor into selOpts
+
+	menuItems []menuItem // flat list: headers + recipes + exit
+	cursor    int        // selected index into menuItems
+	menuOfs   int        // first visible menu line index (smooth scroll)
 }
 
 func newModel(recipes []recipe, autorun []string) model {
@@ -74,12 +105,26 @@ func newModel(recipes []recipe, autorun []string) model {
 	s := spinner.New()
 	s.Style = lipgloss.NewStyle().Foreground(accent)
 	s.Spinner = spinner.Dot
+
+	// Build flat menu items: group headers, recipes, exit.
+	var items []menuItem
+	group := ""
+	for _, r := range recipes {
+		if r.Group != group {
+			group = r.Group
+			items = append(items, menuItem{kind: kindHeader, group: group})
+		}
+		items = append(items, menuItem{kind: kindRecipe, recipe: r})
+	}
+	items = append(items, menuItem{kind: kindExit})
+
 	return model{
-		recipes: recipes,
-		prog:    progress.New(progress.WithDefaultGradient()),
-		input:   ti,
-		spin:    s,
-		autorun: autorun,
+		recipes:   recipes,
+		prog:      progress.New(progress.WithDefaultGradient()),
+		input:     ti,
+		spin:      s,
+		autorun:   autorun,
+		menuItems: items,
 	}
 }
 
@@ -91,35 +136,80 @@ func (m model) Init() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
+// sysInfoHeight returns how many sysinfo lines fit given the terminal height.
+// Reduces one line at a time as space shrinks, down to 3 (OS, Kernel, Uptime).
+// When fields are empty (not yet loaded), returns the full expected count
+// so the UI layout is stable from the first render.
+func (m model) sysInfoHeight() int {
+	n := len(m.fields)
+	if n == 0 {
+		n = 12
+	}
+	// Reserve space for: title(1) + help(1) + gap(1) + at least 8 menu
+	// lines so the recipe list has room before sysinfo starts truncating.
+	reserved := 1 + 1 + 1 + 8
+	maxFit := m.height - reserved
+	if maxFit < 3 {
+		maxFit = 3
+	}
+	if maxFit > n {
+		return n
+	}
+	return maxFit
+}
+
+// menuHeight returns how many menu lines fit below the sysinfo panel
+// and the gap line.
+func (m model) menuHeight() int {
+	sys := m.sysInfoHeight()
+	h := m.height - 1 - sys - 1 - 1 // title, gap, help
+	if h < 1 {
+		h = 1
+	}
+	return h
+}
+
 func (m *model) paneSize() (w, h int) {
 	w = m.width - 4
 	if w < 20 {
 		w = 78
 	}
-	return w, paneHeight
+	sysLines := m.sysInfoHeight()
+	available := m.height - 2 - sysLines - 2
+	h = available
+	if h < 5 {
+		h = 5
+	}
+	if h > 20 {
+		h = 20
+	}
+	return w, h
 }
 
 func (m *model) startRecipe(name string, args []string) tea.Cmd {
 	w, h := m.paneSize()
-	r, err := startRecipe(name, args, w, h, program)
+	rn, err := startRecipe(name, args, w, h, program)
 	if err != nil {
 		m.state = stateDone
 		m.exitCode = 1
 		return nil
 	}
-	m.run = r
+	m.run = rn
 	m.running = name
 	m.state = stateRunning
 	m.progOn = false
 	m.seenOut = false
-	// Start the indeterminate spinner when a [progress] recipe launches
-	// so the user sees activity before the first OSC 9;4 update arrives.
-	if r.Progress {
+	if m.pending.Progress {
 		m.spinOn = true
 		return m.spin.Tick
 	}
 	m.spinOn = false
 	return nil
+}
+
+// isSilent returns true when the running recipe suppresses the CLI overlay.
+func (m *model) isSilent() bool {
+	return m.pending.Silent && !m.pending.Progress
 }
 
 // selectRecipe starts the recipe, prompts for parameters, or shows a
@@ -128,10 +218,8 @@ func (m *model) selectRecipe(r recipe, preArgs []string) tea.Cmd {
 	m.pending = r
 	m.pArgs = preArgs
 
-	// If there are still parameters to collect, prompt for the next one.
 	if len(preArgs) < len(r.Params) {
 		nextParam := r.Params[len(preArgs)]
-		// If this parameter has selectable options, show the selection list.
 		if opts, ok := r.Select[nextParam]; ok && len(opts) > 0 {
 			m.selOpts = opts
 			m.selCur = 0
@@ -145,9 +233,8 @@ func (m *model) selectRecipe(r recipe, preArgs []string) tea.Cmd {
 		return textinput.Blink
 	}
 
-	// All parameters collected: confirm if the recipe asks for it.
 	if r.Confirm != "" {
-		m.confirmIdx = 0 // default to "proceed"
+		m.confirmIdx = 0
 		m.state = stateConfirm
 		return nil
 	}
@@ -169,7 +256,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.prog.Width = msg.Width - 8
-		// First size report: start any recipe given on the command line.
+
+		if m.state == stateRunning && m.run != nil {
+			w, h := m.paneSize()
+			m.run.resizePTY(w, h)
+		}
+
 		if len(m.autorun) > 0 {
 			args := m.autorun
 			m.autorun = nil
@@ -184,6 +276,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case infoMsg:
 		m.fields = msg
+		// Fire the async public IP fetch, and show a placeholder
+		// that will be replaced when the response arrives.
+		return m, tea.Batch(publicIPCmd(), func() tea.Msg {
+			return infoField{"Public IP", "Loading..."}
+		})
+
+	case infoField:
+		// Append or replace the Public IP field (last field).
+		n := len(m.fields)
+		if n > 0 && m.fields[n-1].Label == "Public IP" {
+			m.fields[n-1] = msg
+		} else {
+			m.fields = append(m.fields, msg)
+		}
 		return m, nil
 
 	case ptyDataMsg:
@@ -206,7 +312,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.exitCode = msg.code
 		m.progOn = false
 		m.spinOn = false
-		return m, func() tea.Msg { return infoMsg(gatherInfo()) } // refresh panel
+		return m, func() tea.Msg { return infoMsg(gatherInfo()) }
 
 	case handoverDoneMsg:
 		return m, nil
@@ -217,10 +323,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case stateConfirm:
 			switch msg.String() {
 			case "enter":
-				// Proceed, start the recipe now.
 				return m, m.startRecipe(m.pending.Name, m.pArgs)
 			case "esc", "q":
-				// Cancel, back to the menu.
 				m.state = stateMenu
 				return m, nil
 			case "left", "h":
@@ -285,25 +389,41 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		default: // stateMenu, stateDone
+			n := len(m.menuItems)
+			visible := m.menuHeight()
+
 			switch msg.String() {
-			case "q", "ctrl+c", "esc":
-				return m, tea.Quit
 			case "up", "k":
 				if m.cursor > 0 {
 					m.cursor--
 				}
+				// Smooth scroll: shift offset by 1 when cursor passes the
+				// top edge of the visible window.
+				if m.cursor < m.menuOfs {
+					m.menuOfs--
+				}
+
 			case "down", "j":
-				// len(recipes) is the built-in exit row
-				if m.cursor < len(m.recipes) {
+				if m.cursor < n-1 {
 					m.cursor++
 				}
+				// Smooth scroll: shift offset by 1 when cursor passes the
+				// bottom edge of the visible window.
+				if m.cursor >= m.menuOfs+visible {
+					m.menuOfs++
+				}
+
 			case "enter":
-				if m.cursor == len(m.recipes) {
+				mi := m.menuItems[m.cursor]
+				switch mi.kind {
+				case kindRecipe:
+					return m, m.selectRecipe(mi.recipe, nil)
+				case kindExit:
 					return m, tea.Quit
 				}
-				if len(m.recipes) > 0 {
-					return m, m.selectRecipe(m.recipes[m.cursor], nil)
-				}
+
+			case "q", "ctrl+c", "esc":
+				return m, tea.Quit
 			}
 			return m, nil
 		}
@@ -311,48 +431,107 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m model) viewPanel() string {
+// ── rendering ─────────────────────────────────────────────────
+
+func (m model) viewPanel(maxLines int) string {
 	var b strings.Builder
-	for _, f := range m.fields {
-		b.WriteString(labelStyle.Render(f.Label) + " " + f.Value + "\n")
-	}
 	if len(m.fields) == 0 {
-		b.WriteString(docStyle.Render("gathering system info...") + "\n")
+		for i := 0; i < maxLines; i++ {
+			b.WriteString(docStyle.Render("...") + "\n")
+		}
+		return b.String()
+	}
+	end := maxLines
+	if end > len(m.fields) {
+		end = len(m.fields)
+	}
+	for _, f := range m.fields[:end] {
+		b.WriteString(labelStyle.Render(f.Label) + " " + f.Value + "\n")
 	}
 	return b.String()
 }
 
 func (m model) viewMenu() string {
+	visible := m.menuHeight()
 	var b strings.Builder
-	group := ""
-	for i, r := range m.recipes {
-		if r.Group != group {
-			group = r.Group
-			b.WriteString(groupStyle.Render(group) + "\n")
+	for i := m.menuOfs; i < m.menuOfs+visible && i < len(m.menuItems); i++ {
+		mi := m.menuItems[i]
+		sel := i == m.cursor
+		switch mi.kind {
+		case kindHeader:
+			b.WriteString(groupStyle.Render(mi.group) + "\n")
+		case kindRecipe:
+			name := fmt.Sprintf("%-28s", mi.recipe.Name)
+			if sel {
+				b.WriteString(selStyle.Render("> "+name) + " " + docStyle.Render(mi.recipe.Doc) + "\n")
+			} else {
+				b.WriteString("  " + name + " " + docStyle.Render(mi.recipe.Doc) + "\n")
+			}
+		case kindExit:
+			name := fmt.Sprintf("%-28s", "exit")
+			if sel {
+				b.WriteString(selStyle.Render("> "+name) + " " + docStyle.Render("Close this menu") + "\n")
+			} else {
+				b.WriteString("  " + name + " " + docStyle.Render("Close this menu") + "\n")
+			}
 		}
-		// Fixed-width name column so the doc column doesn't shift when a
-		// row is highlighted (prefix and padding are identical either way).
-		name := fmt.Sprintf("%-28s", r.Name)
-		if i == m.cursor {
-			b.WriteString(selStyle.Render("> "+name) + " " + docStyle.Render(r.Doc) + "\n")
-		} else {
-			b.WriteString("  " + name + " " + docStyle.Render(r.Doc) + "\n")
-		}
-	}
-	// Built-in exit row, last item of the bottom section
-	name := fmt.Sprintf("%-28s", "exit")
-	if m.cursor == len(m.recipes) {
-		b.WriteString(selStyle.Render("> "+name) + " " + docStyle.Render("Close this menu") + "\n")
-	} else {
-		b.WriteString("  " + name + " " + docStyle.Render("Close this menu") + "\n")
 	}
 	return b.String()
 }
 
+// viewOverlay renders the CLI emulator as a bordered overlay box.
+func (m model) viewOverlay() string {
+	var content strings.Builder
+
+	status := selStyle.Render(m.running)
+	if m.state == stateDone {
+		if m.exitCode == 0 {
+			status += " " + okStyle.Render("✓ "+exitLabel(m.exitCode))
+		} else {
+			status += " " + errStyle.Render("✗ "+exitLabel(m.exitCode))
+		}
+	}
+	content.WriteString(status + "\n")
+
+	if m.run != nil {
+		content.WriteString("\n" + m.run.emu.Render() + "\n")
+	}
+
+	if m.spinOn {
+		content.WriteString(m.spin.View() + " " + docStyle.Render("waiting for progress...") + "\n")
+	}
+
+	if m.progOn {
+		content.WriteString(m.prog.ViewAs(float64(m.progPct)/100) + "\n")
+	}
+
+	if m.state == stateRunning {
+		content.WriteString(helpStyle.Render("keys go to the recipe · ctrl+q kill · ctrl+t full terminal"))
+	} else {
+		content.WriteString(helpStyle.Render("recipe finished · ↑/↓ navigate · enter run · q quit"))
+	}
+
+	ow := m.width - 4
+	if ow < 20 {
+		ow = 40
+	}
+	overlayStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(accent).
+		Padding(0, 1).
+		Width(ow)
+	return "\n" + overlayStyle.Render(content.String())
+}
+
 func (m model) View() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("● "+osName()) + "\n\n")
-	b.WriteString(m.viewPanel())
+	b.WriteString(titleStyle.Render("● "+osName()) + "\n")
+
+	sysLines := m.sysInfoHeight()
+	b.WriteString(m.viewPanel(sysLines))
+	// Gap line between sysinfo and menu. Outside the menu so it is
+	// always present regardless of scroll position.
+	b.WriteString("\n")
 
 	switch m.state {
 	case stateSelect:
@@ -380,7 +559,6 @@ func (m model) View() string {
 			confirmStyle = confirmStyle.Width(40)
 		}
 
-		// Build the confirmation prompt text, expanding {{param}} placeholders.
 		prompt := m.pending.Confirm
 		for i, p := range m.pending.Params {
 			if i < len(m.pArgs) {
@@ -388,7 +566,6 @@ func (m model) View() string {
 			}
 		}
 
-		// Render the two options: Proceed / Cancel
 		proceed := " Proceed "
 		cancel := " Cancel "
 		if m.confirmIdx == 0 {
@@ -411,27 +588,22 @@ func (m model) View() string {
 		b.WriteString("\n" + confirmStyle.Render(body) + "\n")
 
 	case statePrompt:
-		// Show all recipe parameters as a form: collected values are marked ✓,
-		// the active field shows the input widget, and future fields are dimmed.
 		formStr := "\n" + selStyle.Render(m.pending.Name) + "\n\n"
 		for i, p := range m.pending.Params {
 			paramLabel := labelStyle.Render(p)
 			if i < len(m.pArgs) {
-				// Already collected, show the value with a checkmark.
 				formStr += fmt.Sprintf("  %s %s  %s\n",
 					okStyle.Render("✓"),
 					paramLabel,
 					docStyle.Render(m.pArgs[i]),
 				)
 			} else if i == len(m.pArgs) {
-				// Active field, show the input.
 				formStr += fmt.Sprintf("  %s %s %s\n",
 					selStyle.Render("⌨"),
 					paramLabel,
 					m.input.View(),
 				)
 			} else {
-				// Future field, dimmed placeholder.
 				formStr += fmt.Sprintf("  %s %s  %s\n",
 					docStyle.Render("·"),
 					paramLabel,
@@ -442,40 +614,41 @@ func (m model) View() string {
 		b.WriteString(formStr)
 		b.WriteString(helpStyle.Render("enter confirm · esc cancel"))
 
-	case stateRunning, stateDone:
-		status := selStyle.Render(m.running)
-		if m.state == stateDone {
+	case stateRunning:
+		if m.isSilent() {
+			status := selStyle.Render(m.running)
+			b.WriteString("\n" + status + "\n")
+			if m.spinOn {
+				b.WriteString(m.spin.View() + " " + docStyle.Render("waiting for progress...") + "\n")
+			}
+			if m.progOn {
+				b.WriteString(m.prog.ViewAs(float64(m.progPct)/100) + "\n")
+			}
+			b.WriteString(m.viewMenu())
+			b.WriteString(helpStyle.Render("ctrl+q kill"))
+		} else {
+			b.WriteString(m.viewOverlay())
+		}
+
+	case stateDone:
+		if m.isSilent() {
+			status := selStyle.Render(m.running)
 			if m.exitCode == 0 {
 				status += " " + okStyle.Render("✓ "+exitLabel(m.exitCode))
 			} else {
 				status += " " + errStyle.Render("✗ "+exitLabel(m.exitCode))
 			}
-		}
-		b.WriteString("\n" + status + "\n")
-		if m.run != nil {
-			// Full terminal width: the emulator trims trailing spaces, so
-			// without an explicit width the border hugs the widest line.
-			ps := paneStyle
-			if m.width > 24 {
-				ps = ps.Width(m.width - 2)
-			}
-			b.WriteString(ps.Render(m.run.emu.Render()) + "\n")
-		}
-		if m.spinOn {
-			b.WriteString(m.spin.View() + " " + docStyle.Render("waiting for progress...") + "\n")
-		}
-		if m.progOn {
-			b.WriteString(m.prog.ViewAs(float64(m.progPct)/100) + "\n")
-		}
-		if m.state == stateRunning {
-			b.WriteString(helpStyle.Render("keys go to the recipe · ctrl+q kill · ctrl+t full terminal"))
-		} else {
+			b.WriteString("\n" + status + "\n")
+			b.WriteString(m.viewMenu())
 			b.WriteString(helpStyle.Render("↑/↓ select · enter run · q quit"))
+		} else {
+			b.WriteString(m.viewOverlay())
 			b.WriteString("\n" + m.viewMenu())
+			b.WriteString(helpStyle.Render("↑/↓ select · enter run · q quit"))
 		}
 
 	default:
-		b.WriteString("\n" + m.viewMenu() + "\n")
+		b.WriteString(m.viewMenu())
 		b.WriteString(helpStyle.Render("↑/↓ select · enter run · q quit"))
 	}
 	return b.String()
