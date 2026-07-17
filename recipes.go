@@ -54,10 +54,35 @@ func loadRecipes(justfile string) ([]recipe, error) {
 		rs = append(rs, rec)
 	}
 	sort.Slice(rs, func(i, j int) bool {
+		ri, rj := groupRank(rs[i].Group), groupRank(rs[j].Group)
+		if ri != rj {
+			return ri < rj
+		}
 		if rs[i].Group != rs[j].Group {
 			return rs[i].Group < rs[j].Group
 		}
 		return rs[i].Name < rs[j].Name
 	})
 	return rs, nil
+}
+
+// groupRank fixes the menu section order; groups not listed sort
+// alphabetically between Hardening and the Power section at the bottom.
+func groupRank(group string) int {
+	switch group {
+	case "System":
+		return 0
+	case "Configuration":
+		return 1
+	case "Network":
+		return 2
+	case "Apps":
+		return 3
+	case "Hardening":
+		return 4
+	case "Power":
+		return 99
+	default:
+		return 50
+	}
 }

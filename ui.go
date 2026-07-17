@@ -200,10 +200,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.cursor--
 				}
 			case "down", "j":
-				if m.cursor < len(m.recipes)-1 {
+				// len(recipes) is the built-in exit row
+				if m.cursor < len(m.recipes) {
 					m.cursor++
 				}
 			case "enter":
+				if m.cursor == len(m.recipes) {
+					return m, tea.Quit
+				}
 				if len(m.recipes) > 0 {
 					return m, m.selectRecipe(m.recipes[m.cursor], nil)
 				}
@@ -241,6 +245,13 @@ func (m model) viewMenu() string {
 		} else {
 			b.WriteString("  " + name + " " + docStyle.Render(r.Doc) + "\n")
 		}
+	}
+	// Built-in exit row, last item of the bottom section
+	name := fmt.Sprintf("%-28s", "exit")
+	if m.cursor == len(m.recipes) {
+		b.WriteString(selStyle.Render("> "+name) + " " + docStyle.Render("Close this menu") + "\n")
+	} else {
+		b.WriteString("  " + name + " " + docStyle.Render("Close this menu") + "\n")
 	}
 	return b.String()
 }
