@@ -1,9 +1,10 @@
-package main
+ package main
 
 import (
 	"encoding/json"
 	"os/exec"
-	"sort"
+	"regexp"
+	"strings"
 )
 
 type recipe struct {
@@ -13,8 +14,11 @@ type recipe struct {
 	Params []string
 }
 
-// loadRecipes reads public recipes from `just --dump`.
+// loadRecipes reads public recipes from the justfile, ordered by their
+// position in the file (from `just --list`), with details from
+// `just --dump --dump-format json`.
 func loadRecipes(justfile string) ([]recipe, error) {
+	// Recipe details (doc, group, params) from JSON dump.
 	out, err := exec.Command("just", "--justfile", justfile,
 		"--dump", "--dump-format", "json").Output()
 	if err != nil {
@@ -23,7 +27,6 @@ func loadRecipes(justfile string) ([]recipe, error) {
 	var dump struct {
 		Recipes map[string]struct {
 			Doc        string `json:"doc"`
-			Private    bool   `json:"private"`
 			Attributes []any  `json:"attributes"`
 			Parameters []struct {
 				Name string `json:"name"`
@@ -34,55 +37,92 @@ func loadRecipes(justfile string) ([]recipe, error) {
 		return nil, err
 	}
 
-	var rs []recipe
-	for name, r := range dump.Recipes {
-		if r.Private || name[0] == '_' {
+	// Recipe order from `just --list --unsorted`, which preserves
+	// Justfile position within each group and excludes private recipes.
+	listOut, err := exec.Command("just", "--justfile", justfile, "--list", "--unsorted").Output()
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse --list output to extract group headers and recipe names in
+	// Justfile order. Lines like "    [Group Name]" start a new section;
+	// lines like "    recipe-name ..." add to the current section.
+	groupRe := regexp.MustCompile(`^    \[(.+)\]`)
+	recipeRe := regexp.MustCompile(`^    ([a-zA-Z][a-zA-Z0-9_-]*)`)
+
+	// Track group first-appearance order and recipe-to-group mapping.
+	type section struct {
+		Group   string
+		Recipes []string
+	}
+	var sections []section
+	var current *section
+
+	for _, line := range strings.Split(string(listOut), "\n") {
+		if m := groupRe.FindStringSubmatch(line); m != nil {
+			sections = append(sections, section{Group: m[1]})
+			current = &sections[len(sections)-1]
 			continue
 		}
-		group := "Other"
-		for _, attr := range r.Attributes {
-			if m, ok := attr.(map[string]any); ok {
-				if g, ok := m["group"].(string); ok {
-					group = g
+		if m := recipeRe.FindStringSubmatch(line); m != nil {
+			if current == nil {
+				// Recipes before any [Group] header are ungrouped.
+				sections = append(sections, section{Group: "Other"})
+				current = &sections[len(sections)-1]
+			}
+			current.Recipes = append(current.Recipes, m[1])
+		}
+	}
+
+	// Group recipes by their [group(...)] attribute from the justfile,
+	// preserving the first-appearance order of each group from --list.
+	// Recipes without a [group(...)] attribute use their section group
+	// from --list instead.
+	groups := make(map[string][]string)   // group → recipe names
+	groupOrder := []string{}              // ordered unique groups
+
+	for _, sec := range sections {
+		for _, name := range sec.Recipes {
+			r, ok := dump.Recipes[name]
+			if !ok {
+				continue
+			}
+			// Resolve the effective group: [group(...)] attribute wins,
+			// fall back to the section group from --list.
+			g := sec.Group
+			for _, attr := range r.Attributes {
+				if m, ok := attr.(map[string]any); ok {
+					if grp, ok := m["group"].(string); ok {
+						g = grp
+						break
+					}
 				}
 			}
+			// Record group first-appearance order.
+			if _, seen := groups[g]; !seen {
+				groupOrder = append(groupOrder, g)
+			}
+			groups[g] = append(groups[g], name)
 		}
-		rec := recipe{Name: name, Doc: r.Doc, Group: group}
-		for _, p := range r.Parameters {
-			rec.Params = append(rec.Params, p.Name)
-		}
-		rs = append(rs, rec)
 	}
-	sort.Slice(rs, func(i, j int) bool {
-		ri, rj := groupRank(rs[i].Group), groupRank(rs[j].Group)
-		if ri != rj {
-			return ri < rj
-		}
-		if rs[i].Group != rs[j].Group {
-			return rs[i].Group < rs[j].Group
-		}
-		return rs[i].Name < rs[j].Name
-	})
-	return rs, nil
-}
 
-// groupRank fixes the menu section order; groups not listed sort
-// alphabetically between Hardening and the Power section at the bottom.
-func groupRank(group string) int {
-	switch group {
-	case "System":
-		return 0
-	case "Configuration":
-		return 1
-	case "Network":
-		return 2
-	case "Apps":
-		return 3
-	case "Hardening":
-		return 4
-	case "Power":
-		return 99
-	default:
-		return 50
+	// Build the flat recipe list: groups in first-appearance order,
+	// recipes within each group in --list order.
+	seen := map[string]bool{}
+	var rs []recipe
+	for _, g := range groupOrder {
+		for _, name := range groups[g] {
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+			r := dump.Recipes[name]
+			rec := recipe{Name: name, Doc: r.Doc, Group: g}
+			for _, p := range r.Parameters {
+				rec.Params = append(rec.Params, p.Name)
+			}
+			rs = append(rs, rec)
+		}
 	}
+	return rs, nil
 }
