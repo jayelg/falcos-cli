@@ -36,6 +36,105 @@ sequence is ignored by plain terminals.
   `/usr/share/falcos/justfile`)
 - `FALCOS_PLAIN` — set to bypass the TUI and exec `just` directly
 
+## UI Integration Convention
+
+Recipes declare how they integrate with the TUI using standard `just` attributes.
+The convention covers three patterns:
+
+### 1. Input parameters
+
+Parameters declared in a recipe signature are automatically collected by the TUI
+before the recipe runs. Each parameter is prompted for in order, and all values
+are passed as arguments to `just`.
+
+```just
+[group("System")]
+install-package PACKAGE:
+    rpm-ostree install {{PACKAGE}}
+```
+
+When selected, the TUI shows a form with all parameters. The user provides
+values, then the recipe runs automatically, no shell-level prompting needed.
+
+### 2. Confirmation popup
+
+Add a `[confirm("prompt text")]` attribute to display a Proceed/Cancel dialog
+before the recipe starts. The prompt text supports `{{param}}` placeholders
+that are expanded with the collected parameter values.
+
+```just
+[confirm("Install package {{PACKAGE}} on {{HOST}}?")]
+install-package PACKAGE HOST:
+    rpm-ostree install {{PACKAGE}}
+```
+
+The user navigates with ←/→ and confirms with Enter or cancels with Esc.
+
+### 3. Progress bar
+
+Add a `[progress]` attribute to indicate the recipe emits OSC 9;4 progress
+sequences. The TUI shows a gradient progress bar at the bottom of the output
+pane while the recipe runs. Use the `falcos-progress` helper (shipped with
+falcos) inside the recipe:
+
+```just
+[progress]
+update-system:
+    falcos-progress 10 "Checking updates..."
+    # ... update commands ...
+    falcos-progress 50 "Downloading..."
+    # ... more commands ...
+    falcos-progress 100 "Done!"
+```
+
+The `falcos-progress` helper emits the standard OSC 9;4 terminal sequence:
+
+```
+printf '\e]9;4;1;%%s\e\\' "$pct"    # set progress to pct%
+printf '\e]9;4;0;0\e\\'              # clear progress bar
+```
+
+### 4. Combining patterns
+
+All three attributes can be combined freely on a single recipe:
+
+```just
+[confirm("Install {{PACKAGE}} on this system?")]
+[progress]
+install-package PACKAGE:
+    falcos-progress 10 "Preparing..."
+    rpm-ostree install {{PACKAGE}}
+    falcos-progress 100 "Done!"
+```
+
+### Flow summary
+
+```
+User selects recipe
+  ↓
+┌─ Any parameters? ──→ Show input form (collect all)
+│                        ↓
+└── No ←──────────────┘
+  ↓
+┌─ [confirm("...")]? ──→ Show Proceed/Cancel popup
+│                         ↓
+└── Yes ←──────────────┘  No → return to menu
+  ↓
+Recipe starts in PTY pane
+  ↓
+┌─ [progress]? ──→ Progress bar rendered from OSC 9;4 sequences
+│                    (falcos-progress helper)
+└── No ←────────┘
+  ↓
+Recipe exits → show exit code + return to menu
+```
+
+## Template justfile
+
+A complete template justfile demonstrating all UI integration patterns is
+available at [`TEMPLATE.justfile`](TEMPLATE.justfile) in this repository.
+Copy it as a starting point for your own image's justfile.
+
 ## Building
 
 ```bash

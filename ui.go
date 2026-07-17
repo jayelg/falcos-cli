@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/bubbles/progress"
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -15,8 +16,10 @@ const paneHeight = 14
 type uiState int
 
 const (
-	stateMenu   uiState = iota
-	statePrompt         // collecting a recipe parameter
+	stateMenu    uiState = iota
+	statePrompt          // collecting a recipe parameter (freeform text)
+	stateSelect          // collecting a recipe parameter (choose from options)
+	stateConfirm         // showing a proceed/cancel confirmation popup
 	stateRunning
 	stateDone
 )
@@ -54,15 +57,28 @@ type model struct {
 	pending  recipe   // recipe awaiting parameters
 	pArgs    []string // collected parameter values
 	autorun  []string // CLI args: recipe to start immediately
+
+	confirmIdx int // 0 = proceed (default), 1 = cancel
+
+	spin    spinner.Model // indeterminate spinner for progress startup
+	spinOn  bool          // spinner currently rendering
+	seenOut bool          // first output or progress received, hide spinner
+
+	selOpts  []string // selectable options for the active parameter
+	selCur   int      // cursor into selOpts
 }
 
 func newModel(recipes []recipe, autorun []string) model {
 	ti := textinput.New()
 	ti.CharLimit = 128
+	s := spinner.New()
+	s.Style = lipgloss.NewStyle().Foreground(accent)
+	s.Spinner = spinner.Dot
 	return model{
 		recipes: recipes,
 		prog:    progress.New(progress.WithDefaultGradient()),
 		input:   ti,
+		spin:    s,
 		autorun: autorun,
 	}
 }
@@ -95,21 +111,48 @@ func (m *model) startRecipe(name string, args []string) tea.Cmd {
 	m.running = name
 	m.state = stateRunning
 	m.progOn = false
+	m.seenOut = false
+	// Start the indeterminate spinner when a [progress] recipe launches
+	// so the user sees activity before the first OSC 9;4 update arrives.
+	if r.Progress {
+		m.spinOn = true
+		return m.spin.Tick
+	}
+	m.spinOn = false
 	return nil
 }
 
-// selectRecipe starts the recipe, or prompts for its first parameter.
+// selectRecipe starts the recipe, prompts for parameters, or shows a
+// confirmation popup, depending on the recipe's declaration.
 func (m *model) selectRecipe(r recipe, preArgs []string) tea.Cmd {
-	if len(preArgs) >= len(r.Params) {
-		return m.startRecipe(r.Name, preArgs)
-	}
 	m.pending = r
 	m.pArgs = preArgs
-	m.input.Placeholder = r.Params[len(preArgs)]
-	m.input.SetValue("")
-	m.input.Focus()
-	m.state = statePrompt
-	return textinput.Blink
+
+	// If there are still parameters to collect, prompt for the next one.
+	if len(preArgs) < len(r.Params) {
+		nextParam := r.Params[len(preArgs)]
+		// If this parameter has selectable options, show the selection list.
+		if opts, ok := r.Select[nextParam]; ok && len(opts) > 0 {
+			m.selOpts = opts
+			m.selCur = 0
+			m.state = stateSelect
+			return nil
+		}
+		m.input.Placeholder = nextParam
+		m.input.SetValue("")
+		m.input.Focus()
+		m.state = statePrompt
+		return textinput.Blink
+	}
+
+	// All parameters collected: confirm if the recipe asks for it.
+	if r.Confirm != "" {
+		m.confirmIdx = 0 // default to "proceed"
+		m.state = stateConfirm
+		return nil
+	}
+
+	return m.startRecipe(r.Name, preArgs)
 }
 
 func (m *model) recipeByName(name string) (recipe, bool) {
@@ -147,17 +190,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.run != nil && !m.run.handover.Load() {
 			m.run.emu.Write(msg) //nolint:errcheck
 		}
+		m.seenOut = true
+		m.spinOn = false
 		return m, nil
 
 	case progressMsg:
 		m.progOn = msg.active
 		m.progPct = msg.pct
+		m.seenOut = true
+		m.spinOn = false
 		return m, nil
 
 	case recipeExitMsg:
 		m.state = stateDone
 		m.exitCode = msg.code
 		m.progOn = false
+		m.spinOn = false
 		return m, func() tea.Msg { return infoMsg(gatherInfo()) } // refresh panel
 
 	case handoverDoneMsg:
@@ -165,7 +213,33 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		switch m.state {
+
+		case stateConfirm:
+			switch msg.String() {
+			case "enter":
+				// Proceed, start the recipe now.
+				return m, m.startRecipe(m.pending.Name, m.pArgs)
+			case "esc", "q":
+				// Cancel, back to the menu.
+				m.state = stateMenu
+				return m, nil
+			case "left", "h":
+				if m.confirmIdx > 0 {
+					m.confirmIdx--
+				}
+			case "right", "l":
+				if m.confirmIdx < 1 {
+					m.confirmIdx++
+				}
+			}
+			return m, nil
+
 		case stateRunning:
+			if m.spinOn {
+				var cmd tea.Cmd
+				m.spin, cmd = m.spin.Update(msg)
+				return m, cmd
+			}
 			switch msg.Type {
 			case tea.KeyCtrlQ:
 				m.run.kill()
@@ -190,6 +264,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			var cmd tea.Cmd
 			m.input, cmd = m.input.Update(msg)
 			return m, cmd
+
+		case stateSelect:
+			switch msg.String() {
+			case "up", "k":
+				if m.selCur > 0 {
+					m.selCur--
+				}
+			case "down", "j":
+				if m.selCur < len(m.selOpts)-1 {
+					m.selCur++
+				}
+			case "enter":
+				m.pArgs = append(m.pArgs, m.selOpts[m.selCur])
+				return m, m.selectRecipe(m.pending, m.pArgs)
+			case "esc":
+				m.state = stateMenu
+				return m, nil
+			}
+			return m, nil
 
 		default: // stateMenu, stateDone
 			switch msg.String() {
@@ -262,10 +355,91 @@ func (m model) View() string {
 	b.WriteString(m.viewPanel())
 
 	switch m.state {
+	case stateSelect:
+		paramName := m.pending.Params[len(m.pArgs)]
+		selStr := "\n" + selStyle.Render(m.pending.Name) +
+			docStyle.Render(" > ") + labelStyle.Render(paramName) + "\n\n"
+		for i, opt := range m.selOpts {
+			if i == m.selCur {
+				selStr += selStyle.Render("▸ "+opt) + "\n"
+			} else {
+				selStr += "  " + docStyle.Render(opt) + "\n"
+			}
+		}
+		b.WriteString(selStr)
+		b.WriteString(helpStyle.Render("↑/↓ navigate · enter select · esc cancel"))
+
+	case stateConfirm:
+		confirmStyle := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(accent).
+			Padding(1, 2).
+			Align(lipgloss.Center).
+			Width(m.width - 6)
+		if m.width < 20 {
+			confirmStyle = confirmStyle.Width(40)
+		}
+
+		// Build the confirmation prompt text, expanding {{param}} placeholders.
+		prompt := m.pending.Confirm
+		for i, p := range m.pending.Params {
+			if i < len(m.pArgs) {
+				prompt = strings.ReplaceAll(prompt, "{{"+p+"}}", m.pArgs[i])
+			}
+		}
+
+		// Render the two options: Proceed / Cancel
+		proceed := " Proceed "
+		cancel := " Cancel "
+		if m.confirmIdx == 0 {
+			proceed = selStyle.Render("▸ Proceed ") + " "
+		} else {
+			proceed = "  Proceed  "
+		}
+		if m.confirmIdx == 1 {
+			cancel = selStyle.Render("▸ Cancel ") + " "
+		} else {
+			cancel = "  Cancel  "
+		}
+
+		body := fmt.Sprintf("%s\n\n%s%s\n\n%s",
+			selStyle.Render(m.pending.Name),
+			prompt,
+			"\n\n"+proceed+cancel,
+			helpStyle.Render("← → navigate · enter confirm · esc cancel"),
+		)
+		b.WriteString("\n" + confirmStyle.Render(body) + "\n")
+
 	case statePrompt:
-		b.WriteString("\n" + m.pending.Name + " needs " +
-			selStyle.Render(m.pending.Params[len(m.pArgs)]) + ":\n")
-		b.WriteString(m.input.View() + "\n")
+		// Show all recipe parameters as a form: collected values are marked ✓,
+		// the active field shows the input widget, and future fields are dimmed.
+		formStr := "\n" + selStyle.Render(m.pending.Name) + "\n\n"
+		for i, p := range m.pending.Params {
+			paramLabel := labelStyle.Render(p)
+			if i < len(m.pArgs) {
+				// Already collected, show the value with a checkmark.
+				formStr += fmt.Sprintf("  %s %s  %s\n",
+					okStyle.Render("✓"),
+					paramLabel,
+					docStyle.Render(m.pArgs[i]),
+				)
+			} else if i == len(m.pArgs) {
+				// Active field, show the input.
+				formStr += fmt.Sprintf("  %s %s %s\n",
+					selStyle.Render("⌨"),
+					paramLabel,
+					m.input.View(),
+				)
+			} else {
+				// Future field, dimmed placeholder.
+				formStr += fmt.Sprintf("  %s %s  %s\n",
+					docStyle.Render("·"),
+					paramLabel,
+					docStyle.Render("…"),
+				)
+			}
+		}
+		b.WriteString(formStr)
 		b.WriteString(helpStyle.Render("enter confirm · esc cancel"))
 
 	case stateRunning, stateDone:
@@ -286,6 +460,9 @@ func (m model) View() string {
 				ps = ps.Width(m.width - 2)
 			}
 			b.WriteString(ps.Render(m.run.emu.Render()) + "\n")
+		}
+		if m.spinOn {
+			b.WriteString(m.spin.View() + " " + docStyle.Render("waiting for progress...") + "\n")
 		}
 		if m.progOn {
 			b.WriteString(m.prog.ViewAs(float64(m.progPct)/100) + "\n")

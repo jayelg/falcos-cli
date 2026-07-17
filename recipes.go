@@ -8,10 +8,13 @@ import (
 )
 
 type recipe struct {
-	Name   string
-	Doc    string
-	Group  string
-	Params []string
+	Name     string
+	Doc      string
+	Group    string
+	Params   []string
+	Confirm  string              // confirmation prompt; empty = no confirmation needed
+	Progress bool                // recipe emits OSC 9;4 progress sequences
+	Select   map[string][]string // parameter name -> selectable options, empty = freeform text
 }
 
 // loadRecipes reads public recipes from the justfile, ordered by their
@@ -120,6 +123,31 @@ func loadRecipes(justfile string) ([]recipe, error) {
 			rec := recipe{Name: name, Doc: r.Doc, Group: g}
 			for _, p := range r.Parameters {
 				rec.Params = append(rec.Params, p.Name)
+			}
+			// Parse custom UI attributes from the just recipe.
+			for _, attr := range r.Attributes {
+				if m, ok := attr.(map[string]any); ok {
+					if confirm, ok := m["confirm"].(string); ok {
+						rec.Confirm = confirm
+					}
+					if prog, ok := m["progress"].(bool); ok && prog {
+						rec.Progress = true
+					}
+					if sel, ok := m["select"].(string); ok && sel != "" {
+						// Format: "param:opt1|opt2|opt3"
+						param, opts, _ := strings.Cut(sel, ":")
+						if param != "" && opts != "" {
+							if rec.Select == nil {
+								rec.Select = make(map[string][]string)
+							}
+							for _, o := range strings.Split(opts, "|") {
+								if o != "" {
+									rec.Select[param] = append(rec.Select[param], o)
+								}
+							}
+						}
+					}
+				}
 			}
 			rs = append(rs, rec)
 		}
