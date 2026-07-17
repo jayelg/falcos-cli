@@ -233,14 +233,13 @@ func (m model) viewMenu() string {
 			group = r.Group
 			b.WriteString(groupStyle.Render(group) + "\n")
 		}
-		line := r.Name
-		if r.Doc != "" {
-			line = fmt.Sprintf("%-28s %s", r.Name, docStyle.Render(r.Doc))
-		}
+		// Fixed-width name column so the doc column doesn't shift when a
+		// row is highlighted (prefix and padding are identical either way).
+		name := fmt.Sprintf("%-28s", r.Name)
 		if i == m.cursor {
-			b.WriteString(selStyle.Render("> "+r.Name) + "  " + docStyle.Render(r.Doc) + "\n")
+			b.WriteString(selStyle.Render("> "+name) + " " + docStyle.Render(r.Doc) + "\n")
 		} else {
-			b.WriteString("  " + line + "\n")
+			b.WriteString("  " + name + " " + docStyle.Render(r.Doc) + "\n")
 		}
 	}
 	return b.String()
@@ -269,7 +268,13 @@ func (m model) View() string {
 		}
 		b.WriteString("\n" + status + "\n")
 		if m.run != nil {
-			b.WriteString(paneStyle.Render(m.run.emu.Render()) + "\n")
+			// Full terminal width: the emulator trims trailing spaces, so
+			// without an explicit width the border hugs the widest line.
+			ps := paneStyle
+			if m.width > 24 {
+				ps = ps.Width(m.width - 2)
+			}
+			b.WriteString(ps.Render(m.run.emu.Render()) + "\n")
 		}
 		if m.progOn {
 			b.WriteString(m.prog.ViewAs(float64(m.progPct)/100) + "\n")
