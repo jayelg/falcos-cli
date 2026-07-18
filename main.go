@@ -28,7 +28,11 @@ func main() {
 
 	// Scripts and pipes get plain just behaviour, no TUI.
 	if !term.IsTerminal(int(os.Stdout.Fd())) || os.Getenv("FALCOS_PLAIN") != "" {
-		justArgs := append([]string{"just", "--justfile", justfilePath()}, args...)
+		// Use a stripped copy so just 1.55+ (which rejects unknown
+		// attributes) can parse the justfile. Temp file cleaned up
+		// by the OS when the process is replaced via syscall.Exec.
+		jf := strippedJustfilePath(justfilePath())
+		justArgs := append([]string{"just", "--justfile", jf}, args...)
 		bin, err := exec.LookPath("just")
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "just not found")
@@ -39,6 +43,9 @@ func main() {
 			os.Exit(1)
 		}
 	}
+
+	// Create a stripped copy for recipe execution (runner.go).
+	strippedJustfile = strippedJustfilePath(justfilePath())
 
 	recipes, err := loadRecipes(justfilePath())
 	if err != nil {
