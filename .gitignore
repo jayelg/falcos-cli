@@ -1,3 +1,6 @@
+falcos-cli
 os-cli
+test.justfile
+system-test.justfile
 *.tar.gz
 *.sha256
