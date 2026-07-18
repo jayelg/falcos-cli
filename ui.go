@@ -89,6 +89,7 @@ type model struct {
 	pending  recipe   // recipe awaiting parameters
 	pArgs    []string // collected parameter values
 	autorun  []string // CLI args: recipe to start immediately
+	cliMode  bool     // true = running from CLI args, not interactive menu
 
 	confirmIdx int // 0 = proceed (default), 1 = cancel
 
@@ -156,12 +157,18 @@ func newModel(recipes []recipe, autorun []string) model {
 		input:     ti,
 		spin:      s,
 		autorun:   autorun,
+		cliMode:   len(autorun) > 0,
 		menuItems: items,
 		cursor:    firstSel,
 	}
 }
 
 func (m model) Init() tea.Cmd {
+	if m.cliMode {
+		// CLI mode: no sysinfo or panel needed, just wait for
+		// the first WindowSizeMsg to trigger the recipe.
+		return nil
+	}
 	cmds := []tea.Cmd{
 		tea.SetWindowTitle(osName()),
 		func() tea.Msg { return infoMsg(gatherInfo()) },
@@ -380,12 +387,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case recipeExitMsg:
 		m.exitCode = msg.code
-		// Recipe controls progress bar visibility via OSC 9;4 state=0.
-		// Only clear on exit if bar wasn't at 100%.
 		if m.progPct < 100 {
 			m.progOn = false
 		}
 		m.spinOn = false
+		// CLI mode: recipe was invoked from the command line, not the
+		// interactive menu. Exit so output stays inline in the terminal.
+		if m.cliMode {
+			return m, tea.Quit
+		}
 		// Silent recipes go straight back to menu so the user can
 		// immediately select another recipe without an extra Enter.
 		if m.pending.Silent {
@@ -758,8 +768,10 @@ func (m model) viewOverlay() string {
 		content.WriteString(m.prog.ViewAs(float64(m.progPct)/100) + "\n")
 	}
 
-	if m.state == stateRunning {
-		content.WriteString(helpStyle.Render("keys go to the recipe · ctrl+q kill · ctrl+t full terminal"))
+	if m.cliMode {
+		content.WriteString(helpStyle.Render("ctrl+q kill"))
+	} else if m.state == stateRunning {
+		content.WriteString(helpStyle.Render("keys go to the recipe · ctrl+q kill"))
 	} else {
 		content.WriteString(helpStyle.Render("recipe finished · enter close · ↑/↓ navigate · q quit"))
 	}
@@ -942,12 +954,42 @@ func (m model) overlayView(bgBase, content, bgHelp string, styleFn func(lipgloss
 
 func (m model) View() string {
 	var b strings.Builder
+
+	if m.cliMode {
+		// CLI mode: output streams inline in the terminal scrollback.
+		// No border, no overlay compositing, no sysinfo panel or menu.
+		// Each state renders its content as a plain string.
+		switch m.state {
+		case stateRunning:
+			return m.viewOverlay()
+		case stateInlinePrompt:
+			return m.viewOverlayWithPrompt()
+		case stateInlineConfirm:
+			return m.viewOverlayWithConfirm()
+		case stateOptionSelect:
+			var body strings.Builder
+			body.WriteString(selStyle.Render(m.running) + "\n\n")
+			if m.optSelect.prompt != "" {
+				body.WriteString(docStyle.Render(m.optSelect.prompt) + "\n\n")
+			}
+			for i, opt := range m.optSelect.options {
+				if i == m.optSelect.cursor {
+					body.WriteString(selStyle.Render("▸ "+opt) + "\n")
+				} else {
+					body.WriteString("  " + docStyle.Render(opt) + "\n")
+				}
+			}
+			body.WriteString(helpStyle.Render("↑/↓ navigate · enter select · esc cancel"))
+			return body.String()
+		default:
+			return ""
+		}
+	}
+
 	b.WriteString(titleStyle.Render("● "+osName()) + "\n")
 
 	sysLines := m.sysInfoHeight()
 	b.WriteString(m.viewPanel(sysLines))
-	// Gap line between sysinfo and menu. Outside the menu so it is
-	// always present regardless of scroll position.
 	b.WriteString("\n")
 
 	switch m.state {

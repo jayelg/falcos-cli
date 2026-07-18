@@ -54,7 +54,13 @@ func main() {
 	}
 
 	m := newModel(recipes, args)
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	opts := []tea.ProgramOption{tea.WithAltScreen()}
+	if len(args) > 0 {
+		// CLI mode: no alt-screen so output stays inline in the terminal
+		// scrollback. Program exits when the recipe finishes.
+		opts = nil
+	}
+	p := tea.NewProgram(m, opts...)
 	program = p // for terminal handover from within Update
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
