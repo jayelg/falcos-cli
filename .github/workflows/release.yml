@@ -31,8 +31,14 @@ jobs:
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
-          asset="falcos-cli-v${version}-x86_64-unknown-linux-gnu.tar.gz"
-          tar -czf "$asset" falcos-cli
+          asset="falcos-cli-v${version}-x86_64-linux-gnu.tar.gz"
+          # Bundle the binary, runtime helpers, and install script so the
+          # falcos image installs everything from one artifact.
+          tar -czf "$asset" \
+            falcos-cli \
+            install.sh \
+            scripts/falcos-helpers.sh \
+            scripts/falcos-progress
           sha256sum "$asset" | cut -d' ' -f1 > "${asset}.sha256"
           echo "asset=${asset}" >> "$GITHUB_OUTPUT"
 
