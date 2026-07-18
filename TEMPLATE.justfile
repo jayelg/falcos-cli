@@ -1,10 +1,16 @@
 # ─────────────────────────────────────────────────────────
 # TEMPLATE: falcos-cli UI Integration Patterns
 # ─────────────────────────────────────────────────────────
-# Illustrates each UI convention pattern with example
-# recipes. The patterns combine freely.
+# All patterns use runtime-driven OSC protocol so the
+# recipe script controls UI interactions at any point.
+# Inline helpers (paste at top of any recipe):
 #
-# See README.md for full documentation.
+#   prog() { local p="${1:-0}" l="${2:-}"; if [[ "$p" == "clear" ]]; then printf '\e]9;4;0;0\e\\'; elif [[ -n "$l" ]]; then printf '\e]9;4;1;%d;%s\e\\' "$p" "$l"; else printf '\e]9;4;1;%d\e\\' "$p"; fi; }
+#   prompt() { printf '\e]9;5;%s;%s\e\\' "$1" "${2:-false}" >&2; read -r r; echo "$r"; }
+#   choose() { printf '\e]9;6;%s;%s\e\\' "$1" "$2" >&2; read -r c; echo "$c"; }
+#   confirm() { local o="${2:-Proceed|Cancel}" c="${3:-0}"; printf '\e]9;7;%s;%s;%s\e\\' "$1" "$o" "$c" >&2; read -r r; echo "$r"; }
+#
+# See scripts/falcos-helpers.sh for standalone copies.
 # ─────────────────────────────────────────────────────────
 set allow-duplicate-recipes := true
 set ignore-comments := true
@@ -12,151 +18,143 @@ set ignore-comments := true
 _default:
     @just --justfile '{{ justfile() }}' --list --list-heading $'Available commands:\n' --list-prefix $' - '
 
-# ─── Pattern: Silent ─────────────────────────────────────
-# No attributes needed. The recipe runs immediately on
-# selection with no UI preamble.
-
-# Show system information
-[group('System')]
-sysinfo:
-    uname -a
-    uptime
-
-# List available disk space
-[group('System')]
-disk-usage:
-    df -h
-
 # ─── Pattern: Progress ──────────────────────────────────
-# [progress] tells the TUI this recipe emits OSC 9;4
-# sequences via falcos-progress. An indeterminate spinner
-# animates until the first progress update arrives.
-
 [group('System')]
 [progress]
 update:
     #!/usr/bin/bash
-    prog=/usr/libexec/falcos-progress
-    [ -x "$prog" ] || prog=:
+    prog() { local p="${1:-0}" l="${2:-}"; if [[ "$p" == "clear" ]]; then printf '\e]9;4;0;0\e\\'; elif [[ -n "$l" ]]; then printf '\e]9;4;1;%d;%s\e\\' "$p" "$l"; else printf '\e]9;4;1;%d\e\\' "$p"; fi; }
     echo "Step 1..."
-    "$prog" 25
+    prog 25
     sleep 1
     echo "Step 2..."
-    "$prog" 50
+    prog 50
     sleep 1
     echo "Step 3..."
-    "$prog" 75
+    prog 75
     sleep 1
-    "$prog" 100
-    "$prog" clear
-    echo "Done."
+    echo "Complete."
+    prog 100
+    prog clear
 
-# ─── Pattern: Silent ─────────────────────────────────────
-# [silent] tells the TUI not to show the CLI overlay during
-# execution. Use for recipes that produce no useful terminal
-# output, such as one-shot system commands (reboot, shutdown).
+# ─── Pattern: Silent + Inline Confirm ───────────────────
+# [silent] suppresses the CLI overlay. Use confirm() inline.
 
 [group('Power')]
 [silent]
-[confirm("Reboot now?")]
 reboot:
-    systemctl reboot
-
-[group('Power')]
-[silent]
-[confirm("Shut down now?")]
-shutdown:
-    systemctl poweroff
-
-# ─── Pattern: Confirm ────────────────────────────────────
-# [confirm("prompt")] shows a Proceed/Cancel popup before
-# the recipe starts. Supports {{param}} placeholders.
-
-[group('Power')]
-[confirm("Reboot now?")]
-reboot:
-    systemctl reboot
-
-[group('Power')]
-[confirm("Shut down now?")]
-shutdown:
-    systemctl poweroff
-
-[group('Power')]
-[confirm("Reboot into UEFI setup?")]
-reboot-uefi:
-    if [ ! -d /sys/firmware/efi ]; then
-        echo "Not a UEFI system."
-        exit 1
+    #!/usr/bin/bash
+    confirm() { local o="${2:-Proceed|Cancel}" c="${3:-0}"; printf '\e]9;7;%s;%s;%s\e\\' "$1" "$o" "$c" >&2; read -r r; echo "$r"; }
+    if [[ "$(confirm "Reboot now?")" == "Proceed" ]]; then
+        systemctl reboot
+    else
+        echo "Cancelled."
     fi
-    systemctl reboot --firmware-setup
 
-# ─── Pattern: Input parameters ──────────────────────────
-# Parameters in the recipe signature are collected by the
-# TUI before running. All values are passed as arguments
-# to `just`.
+[group('Power')]
+[silent]
+shutdown:
+    #!/usr/bin/bash
+    confirm() { local o="${2:-Proceed|Cancel}" c="${3:-0}"; printf '\e]9;7;%s;%s;%s\e\\' "$1" "$o" "$c" >&2; read -r r; echo "$r"; }
+    if [[ "$(confirm "Shut down now?")" == "Proceed" ]]; then
+        systemctl poweroff
+    else
+        echo "Cancelled."
+    fi
 
+# ─── Pattern: Runtime Text Input (OSC 9;5) ──────────────
 [group('Configuration')]
-set-hostname NAME:
-    hostnamectl hostname {{NAME}}
+setup-vpn:
+    #!/usr/bin/bash
+    prompt() { printf '\e]9;5;%s;%s\e\\' "$1" "${2:-false}" >&2; read -r r; echo "$r"; }
+    user=$(prompt "VPN username:")
+    pass=$(prompt "VPN password:" true)
+    echo "Configuring VPN for $user..."
 
-[group('Configuration')]
-set-motd MESSAGE:
-    echo "{{MESSAGE}}" > /etc/motd
+# ─── Pattern: Progress + Confirm + Clear (OSC 9;7) ──────
+# Pass 1 as 3rd arg to clear CLI output before showing popup.
+[group('System')]
+[progress]
+update-with-restart:
+    #!/usr/bin/bash
+    prog() { local p="${1:-0}" l="${2:-}"; if [[ "$p" == "clear" ]]; then printf '\e]9;4;0;0\e\\'; elif [[ -n "$l" ]]; then printf '\e]9;4;1;%d;%s\e\\' "$p" "$l"; else printf '\e]9;4;1;%d\e\\' "$p"; fi; }
+    confirm() { local o="${2:-Proceed|Cancel}" c="${3:-0}"; printf '\e]9;7;%s;%s;%s\e\\' "$1" "$o" "$c" >&2; read -r r; echo "$r"; }
 
-# ─── Pattern: Select options ────────────────────────────
-# [select("param:opt1|opt2|opt3")] shows a navigable list
-# instead of a freeform text input for that parameter.
+    echo "==> Updating system image..."
+    prog 10 "bootc upgrade"
+    sleep 2
+    prog 40 "bootc upgrade"
 
-[group('Configuration')]
-[select("SIZE:1 GiB|2 GiB|4 GiB|8 GiB")]
-create-swap SIZE:
-    fallocate -l {{SIZE}} /swapfile
-    chmod 600 /swapfile
-    mkswap /swapfile
-    swapon /swapfile
+    echo "==> Updating flatpaks..."
+    prog 50 "flatpak update"
+    sleep 2
+    prog 80 "flatpak update"
 
-[group('Configuration')]
-[select("BACKEND:docker|podman")]
-install-container-tool BACKEND:
-    # Install the selected container runtime.
-    echo "Installing {{BACKEND}}..."
+    echo "==> Complete"
+    prog 100 "Complete"
+
+    if [[ "$(confirm "Restart now?" "Restart now|Close" 1)" == "Restart now" ]]; then
+        systemctl reboot
+    fi
+    prog clear
+
+# ─── Pattern: Runtime Option Select (OSC 9;6) ──────────
+[group('System')]
+[progress]
+build:
+    #!/usr/bin/bash
+    prog() { local p="${1:-0}" l="${2:-}"; if [[ "$p" == "clear" ]]; then printf '\e]9;4;0;0\e\\'; elif [[ -n "$l" ]]; then printf '\e]9;4;1;%d;%s\e\\' "$p" "$l"; else printf '\e]9;4;1;%d\e\\' "$p"; fi; }
+    choose() { printf '\e]9;6;%s;%s\e\\' "$1" "$2" >&2; read -r c; echo "$c"; }
+    confirm() { local o="${2:-Proceed|Cancel}" c="${3:-0}"; printf '\e]9;7;%s;%s;%s\e\\' "$1" "$o" "$c" >&2; read -r r; echo "$r"; }
+
+    flavor=$(choose "Select flavor?" "desktop|laptop|server")
+    if [[ "$(confirm "Build $flavor image?")" == "Proceed" ]]; then
+        prog 10 "Building..."
+        echo "Building $flavor image..."
+        sleep 2
+        prog 80 "Building..."
+        echo "Finalising..."
+        sleep 1
+        prog 100 "Complete"
+        prog clear
+        echo "$flavor image built."
+    fi
 
 # ─── Pattern: Combined ───────────────────────────────────
-# All attributes combine freely on a single recipe.
-
 [group('System')]
-[confirm("Install package {{PACKAGE}}?")]
 [progress]
 install PACKAGE:
     #!/usr/bin/bash
-    prog=/usr/libexec/falcos-progress
-    [ -x "$prog" ] || prog=:
-    "$prog" 10
-    echo "Installing {{PACKAGE}}..."
+    prog() { local p="${1:-0}" l="${2:-}"; if [[ "$p" == "clear" ]]; then printf '\e]9;4;0;0\e\\'; elif [[ -n "$l" ]]; then printf '\e]9;4;1;%d;%s\e\\' "$p" "$l"; else printf '\e]9;4;1;%d\e\\' "$p"; fi; }
+    prompt() { printf '\e]9;5;%s;%s\e\\' "$1" "${2:-false}" >&2; read -r r; echo "$r"; }
+
+    version=$(prompt "Version:")
+    prog 10 "Installing..."
+    echo "Installing {{PACKAGE}}@$version..."
     sleep 1
-    "$prog" 60
+    prog 60 "Installing..."
     echo "Finalising..."
     sleep 1
-    "$prog" 100
+    prog 100 "Complete"
+    prog clear
     echo "{{PACKAGE}} installed."
 
 [group('System')]
-[select("FLAVOR:desktop|laptop|server")]
-[confirm("Build {{FLAVOR}} image?")]
 [progress]
-build FLAVOR:
+setup-dotfiles:
     #!/usr/bin/bash
-    prog=/usr/libexec/falcos-progress
-    [ -x "$prog" ] || prog=:
-    "$prog" 10
-    echo "Building {{FLAVOR}} image..."
-    sleep 2
-    "$prog" 80
-    echo "Finalising..."
-    sleep 1
-    "$prog" 100
-    echo "{{FLAVOR}} image built."
+    prog() { local p="${1:-0}" l="${2:-}"; if [[ "$p" == "clear" ]]; then printf '\e]9;4;0;0\e\\'; elif [[ -n "$l" ]]; then printf '\e]9;4;1;%d;%s\e\\' "$p" "$l"; else printf '\e]9;4;1;%d\e\\' "$p"; fi; }
+    prompt() { printf '\e]9;5;%s;%s\e\\' "$1" "${2:-false}" >&2; read -r r; echo "$r"; }
+
+    echo "Configuring dotfiles..."
+    prog 25
+    repo=$(prompt "Dotfiles repo URL:")
+    echo "Cloning $repo..."
+    prog 75
+    branch=$(prompt "Branch:")
+    echo "Using branch $branch"
+    prog 100
+    prog clear
 
 # Personal additions
 import? "~/.config/just/user.justfile"
