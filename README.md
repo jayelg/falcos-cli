@@ -39,7 +39,7 @@ sequence is ignored by plain terminals.
 ## UI Integration Convention
 
 Recipes declare how they integrate with the TUI using standard `just` attributes.
-The convention covers three patterns:
+The convention covers six patterns:
 
 ### 1. Input parameters
 
@@ -94,9 +94,46 @@ printf '\e]9;4;1;%%s\e\\' "$pct"    # set progress to pct%
 printf '\e]9;4;0;0\e\\'              # clear progress bar
 ```
 
-### 4. Combining patterns
+### 4. Inline prompts (during execution)
 
-All three attributes can be combined freely on a single recipe:
+For prompts that happen mid-recipe (not just parameters), recipes call the
+`falcos-prompt` helper which emits an OSC 9;5 sequence. The TUI intercepts it
+and shows a focused input overlay. After the user responds, the value is written
+back to the recipe's input.
+
+```just
+[progress]
+setup-dotfiles:
+    #!/usr/bin/bash
+    repo=$(falcos-prompt "Dotfiles repo URL:"; read -r)
+    branch=$(falcos-prompt "Branch:"; read -r)
+    echo "Cloning $repo branch $branch..."
+```
+
+Password prompts pass `secret` as a second argument to mask input:
+
+```just
+setup-vpn:
+    #!/usr/bin/bash
+    user=$(falcos-prompt "VPN username:"; read -r)
+    pass=$(falcos-prompt "VPN password:" secret; read -rs)
+    echo "Configuring VPN for $user..."
+```
+
+The `falcos-prompt` helper emits the OSC 9;5 terminal sequence:
+
+```
+printf '\e]9;5;%s;%s\e\\' "$text" "$secret"    # prompt with optional secret mode
+```
+
+The recipe calls `falcos-prompt` followed by `read` (or `read -rs` for secrets).
+`falcos-prompt` emits the OSC synchronously and returns; the TUI intercepts it
+before the `read` blocks, shows the prompt overlay, and writes the user's
+response to the PTY on submit.
+
+### 5. Combining patterns
+
+All attributes can be combined freely on a single recipe:
 
 ```just
 [confirm("Install {{PACKAGE}} on this system?")]
@@ -107,7 +144,7 @@ install-package PACKAGE:
     falcos-progress 100 "Done!"
 ```
 
-### 5. Silent execution
+### 6. Silent execution
 
 Add a `[silent]` attribute to suppress the CLI overlay during execution.
 Recipes that produce no useful terminal output (reboot, shutdown) benefit
@@ -147,6 +184,11 @@ User selects recipe
 └── No ←───────┘
   ↓
 Recipe starts in PTY pane (CLI overlay)
+  ↓
+┌─ falcos-prompt? ──→ Show inline prompt overlay
+│                       (user responds → written to PTY)
+│                       ↓ Loop back to running state
+└── No ←────────────┘
   ↓
 ┌─ [progress]? ──→ Progress bar rendered below CLI output
 │                    (falcos-progress helper)
