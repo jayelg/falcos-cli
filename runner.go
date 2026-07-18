@@ -19,12 +19,30 @@ import (
 // full-screen child (tea.Program.ReleaseTerminal/RestoreTerminal).
 var program *tea.Program
 
+// strippedJustfile is set from main to the path of a justfile copy with
+// falcos-specific attributes removed, so just 1.55+ can parse it.
+var strippedJustfile string
+
 type ptyDataMsg []byte
 type recipeExitMsg struct{ code int }
 type handoverDoneMsg struct{}
 type progressMsg struct {
-	pct    int  // 0-100
-	active bool // false clears the bar
+	pct    int    // 0-100
+	active bool   // false clears the bar
+	label  string // optional phase label (e.g. "Downloading...")
+}
+type promptRequiredMsg struct {
+	text   string
+	secret bool
+}
+type optionRequiredMsg struct {
+	prompt  string   // text shown above the options
+	options []string // selectable choices
+}
+type confirmRequiredMsg struct {
+	prompt  string   // confirmation text
+	options []string // two button labels: [opt1, opt2]
+	clear   bool     // true = clear emulator output before showing
 }
 
 type runner struct {
@@ -34,29 +52,62 @@ type runner struct {
 	handover atomic.Bool // raw passthrough active, reader bypasses the emulator
 }
 
-// startRecipe launches `just <recipe> [args...]` on a PTY sized to the
-// output pane, feeding output into a vt emulator for embedded rendering.
-func startRecipe(name string, args []string, w, h int, prog *tea.Program) (*runner, error) {
+// startRecipe launches `just [flags...] <recipe> [args...]` on a PTY sized
+// to the output pane, feeding output into a vt emulator for embedded
+// rendering. extraFlags are just flags (e.g. --yes) inserted before the
+// recipe name.
+func startRecipe(name string, args []string, w, h int, prog *tea.Program, extraFlags ...string) (*runner, error) {
 	r := &runner{emu: vt.NewEmulator(w, h)}
 
-	// OSC 9;4 terminal progress (Windows Terminal / ConEmu / systemd
-	// convention): ESC ] 9 ; 4 ; <state> ; <pct> BEL. Recipes emit it via
-	// the falcos-progress helper; state 0 clears, 1 sets percent.
+	// OSC 9 dispatcher: sub-identifier 4 = progress, 5 = prompt, 6 = option select.
+	// Async Send: handler runs inside emu.Write which runs inside Update;
+	// synchronous Send would deadlock on the message loop.
 	r.emu.RegisterOscHandler(9, func(data []byte) bool {
 		parts := strings.Split(string(data), ";")
-		if len(parts) < 3 || parts[0] != "9" || parts[1] != "4" {
+		if len(parts) < 3 || parts[0] != "9" {
 			return false
 		}
-		state := parts[2]
-		pct := 0
-		if len(parts) > 3 {
-			pct, _ = strconv.Atoi(parts[3])
+		switch parts[1] {
+		case "4": // progress: ESC ] 9 ; 4 ; <state> ; <pct> [ ; <label> ] ST
+			state := parts[2]
+			pct := 0
+			if len(parts) > 3 {
+				pct, _ = strconv.Atoi(parts[3])
+			}
+			label := ""
+			if len(parts) > 4 {
+				label = parts[4]
+			}
+			go prog.Send(progressMsg{pct: pct, active: state == "1" || state == "3", label: label})
+			return true
+		case "5": // prompt: ESC ] 9 ; 5 ; <text> ; <secret> ST
+			text := parts[2]
+			secret := len(parts) > 3 && parts[3] == "true"
+			go prog.Send(promptRequiredMsg{text: text, secret: secret})
+			return true
+		case "6": // option select: ESC ] 9 ; 6 ; <prompt> ; <opt1|opt2|...> ST
+			prompt := parts[2]
+			opts := []string{}
+			if len(parts) > 3 {
+				opts = strings.Split(parts[3], "|")
+			}
+			go prog.Send(optionRequiredMsg{prompt: prompt, options: opts})
+			return true
+		case "7": // confirm: ESC ] 9 ; 7 ; <prompt> [ ; <opt1|opt2> [ ; <clear> ]] ST
+			prompt := parts[2]
+			opts := []string{"Proceed", "Cancel"}
+			if len(parts) > 3 {
+				opts = strings.Split(parts[3], "|")
+			}
+			clear := len(parts) > 4 && parts[4] == "1"
+			go prog.Send(confirmRequiredMsg{prompt: prompt, options: opts, clear: clear})
+			return true
+		case "8": // clear CLI output from overlay: ESC ] 9 ; 8 ST
+			// Deprecated — clear is now part of OSC 9;7's 5th field.
+			// Kept for backward compatibility.
+			return true
 		}
-		// Async: this handler runs inside emu.Write, which runs inside the
-		// model's Update. A synchronous Send would block on the message
-		// loop that is currently in Update -> deadlock.
-		go prog.Send(progressMsg{pct: pct, active: state == "1" || state == "3"})
-		return true
+		return false
 	})
 	r.emu.SetCallbacks(vt.Callbacks{
 		AltScreen: func(on bool) {
@@ -68,7 +119,8 @@ func startRecipe(name string, args []string, w, h int, prog *tea.Program) (*runn
 		},
 	})
 
-	cmdArgs := append([]string{"--justfile", justfilePath(), name}, args...)
+	cmdArgs := append(extraFlags, "--justfile", strippedJustfile, name)
+	cmdArgs = append(cmdArgs, args...)
 	r.cmd = exec.Command("just", cmdArgs...)
 	r.cmd.Env = append(os.Environ(), "TERM=xterm-256color")
 
@@ -128,9 +180,10 @@ func (r *runner) enterHandover(prog *tea.Program) {
 	oldState, rawErr := term.MakeRaw(fd)
 	if tw, th, err := term.GetSize(int(os.Stdout.Fd())); err == nil {
 		pty.Setsize(r.ptmx, &pty.Winsize{Rows: uint16(th), Cols: uint16(tw)}) //nolint:errcheck
+		r.emu.Resize(tw, th)
 	}
-	// Repaint whatever the emulator last held, then stream live.
-	os.Stdout.WriteString("\x1b[2J\x1b[H" + r.emu.Render() + "\n")
+	// Clear screen; live PTY output streams from home.
+	os.Stdout.WriteString("\x1b[2J\x1b[H")
 
 	stdinDone := make(chan struct{})
 	go func() {
@@ -139,6 +192,9 @@ func (r *runner) enterHandover(prog *tea.Program) {
 	}()
 
 	r.cmd.Process.Wait() //nolint:errcheck
+	r.ptmx.Close()       //nolint:errcheck
+	<-stdinDone          // wait for the copy goroutine to finish
+
 	if rawErr == nil {
 		term.Restore(fd, oldState) //nolint:errcheck
 	}
@@ -151,6 +207,7 @@ func (r *runner) resizePTY(w, h int) {
 	pty.Setsize(r.ptmx, &pty.Winsize{Rows: uint16(h), Cols: uint16(w)}) //nolint:errcheck
 	r.emu.Resize(w, h)
 }
+
 
 func (r *runner) kill() {
 	if r.cmd != nil && r.cmd.Process != nil {
@@ -214,7 +271,10 @@ func keyBytes(k tea.KeyMsg) []byte {
 
 func exitLabel(code int) string {
 	if code == 0 {
-		return "ok"
+		return "done"
+	}
+	if code < 0 {
+		return "cancelled"
 	}
 	return fmt.Sprintf("exit %d", code)
 }

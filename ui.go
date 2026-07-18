@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 type uiState int
@@ -20,6 +21,9 @@ const (
 	stateConfirm         // showing a proceed/cancel confirmation popup
 	stateRunning
 	stateDone
+	stateInlinePrompt    // mid-execution text/password prompt from the recipe
+	stateOptionSelect    // mid-execution option selector (OSC 9;6) from the recipe
+	stateInlineConfirm   // mid-execution confirm (OSC 9;7) from the recipe
 )
 
 var (
@@ -80,6 +84,7 @@ type model struct {
 	prog     progress.Model
 	progPct  int
 	progOn   bool
+	progLabel string // phase label from recipe (e.g. "Downloading...")
 	input    textinput.Model
 	pending  recipe   // recipe awaiting parameters
 	pArgs    []string // collected parameter values
@@ -87,9 +92,27 @@ type model struct {
 
 	confirmIdx int // 0 = proceed (default), 1 = cancel
 
+	inlinePrompt struct {
+		text   string // prompt text to display
+		secret bool   // true = mask input as password
+	}
+
 	spin    spinner.Model // indeterminate spinner for progress startup
 	spinOn  bool          // spinner currently rendering
 	seenOut bool          // first output or progress received, hide spinner
+
+	optSelect struct {
+		prompt  string   // text shown above the options
+		options []string // selectable choices
+		cursor  int      // index into options
+	}
+
+	inlineConfirm struct {
+		prompt  string   // confirmation text
+		options []string // two button labels [opt1, opt2]
+	}
+
+	clsOutput bool // true = skip emulator render (set by confirm clear field)
 
 	selOpts []string // selectable options for the active parameter
 	selCur  int      // cursor into selOpts
@@ -118,6 +141,15 @@ func newModel(recipes []recipe, autorun []string) model {
 	}
 	items = append(items, menuItem{kind: kindExit})
 
+	// Set initial cursor to the first selectable item (skip group headers).
+	firstSel := 0
+	for i, it := range items {
+		if it.kind != kindHeader {
+			firstSel = i
+			break
+		}
+	}
+
 	return model{
 		recipes:   recipes,
 		prog:      progress.New(progress.WithDefaultGradient()),
@@ -125,6 +157,7 @@ func newModel(recipes []recipe, autorun []string) model {
 		spin:      s,
 		autorun:   autorun,
 		menuItems: items,
+		cursor:    firstSel,
 	}
 }
 
@@ -170,10 +203,7 @@ func (m model) menuHeight() int {
 }
 
 func (m *model) paneSize() (w, h int) {
-	w = m.width - 4
-	if w < 20 {
-		w = 78
-	}
+	w = m.overlayWidth()
 	sysLines := m.sysInfoHeight()
 	available := m.height - 2 - sysLines - 2
 	h = available
@@ -186,9 +216,27 @@ func (m *model) paneSize() (w, h int) {
 	return w, h
 }
 
+// overlayWidth returns the content width for the CLI overlay.
+// Scales proportionally with terminal width so the overlay is always
+// centered with equal visible margin.
+func (m *model) overlayWidth() int {
+	w := m.width * 3 / 4    // 75% of terminal
+	if w > 100 {
+		w = 100               // cap for very wide terminals
+	}
+	if w < 40 {
+		w = 40                // floor for narrow terminals
+	}
+	return w
+}
+
 func (m *model) startRecipe(name string, args []string) tea.Cmd {
 	w, h := m.paneSize()
-	rn, err := startRecipe(name, args, w, h, program)
+	var extraFlags []string
+	if m.pending.Confirm != "" {
+		extraFlags = []string{"--yes"}
+	}
+	rn, err := startRecipe(name, args, w, h, program, extraFlags...)
 	if err != nil {
 		m.state = stateDone
 		m.exitCode = 1
@@ -255,7 +303,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		m.prog.Width = msg.Width - 8
+		// Progress bar fits inside the overlay's inner width:
+		// overlayWidth() - RoundedBorder (2) - Padding(0, 1) (2).
+		m.prog.Width = m.overlayWidth() - 4
+
+		// Clamp cursor and scroll offset after resize so the selected
+		// item doesn't end up off-screen when the terminal shrinks.
+		n := len(m.menuItems)
+		visible := m.menuHeight()
+		if m.cursor >= n {
+			m.cursor = n - 1
+		}
+		maxOfs := n - visible
+		if maxOfs < 0 {
+			maxOfs = 0
+		}
+		if m.menuOfs > maxOfs {
+			m.menuOfs = maxOfs
+		}
+		if m.menuOfs < 0 {
+			m.menuOfs = 0
+		}
 
 		if m.state == stateRunning && m.run != nil {
 			w, h := m.paneSize()
@@ -301,24 +369,143 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case progressMsg:
-		m.progOn = msg.active
 		m.progPct = msg.pct
+		m.progLabel = msg.label
+		// Recipe controls visibility via state; keep bar at 100% so user
+		// sees completion. Recipe sends state=0 to clear explicitly.
+		m.progOn = msg.active || msg.pct == 100
 		m.seenOut = true
 		m.spinOn = false
 		return m, nil
 
 	case recipeExitMsg:
-		m.state = stateDone
 		m.exitCode = msg.code
-		m.progOn = false
+		// Recipe controls progress bar visibility via OSC 9;4 state=0.
+		// Only clear on exit if bar wasn't at 100%.
+		if m.progPct < 100 {
+			m.progOn = false
+		}
 		m.spinOn = false
-		return m, func() tea.Msg { return infoMsg(gatherInfo()) }
+		// Silent recipes go straight back to menu so the user can
+		// immediately select another recipe without an extra Enter.
+		if m.pending.Silent {
+			m.state = stateMenu
+		} else {
+			m.state = stateDone
+		}
+		return m, nil
 
 	case handoverDoneMsg:
+		if m.run != nil {
+			w, h := m.paneSize()
+			m.run.emu.Resize(w, h)
+		}
+		return m, nil
+
+	case promptRequiredMsg:
+		m.inlinePrompt.text = msg.text
+		m.inlinePrompt.secret = msg.secret
+		m.state = stateInlinePrompt
+		m.input.SetValue("")
+		m.input.Focus()
+		// Size the input to fill the remaining overlay width after the
+		// prompt label so the whole prompt fits on one line.
+		m.input.Width = m.overlayWidth() - 4 - lipgloss.Width(msg.text) - 3
+		if m.input.Width < 10 {
+			m.input.Width = 10
+		}
+		return m, textinput.Blink
+
+	case optionRequiredMsg:
+		m.optSelect.prompt = msg.prompt
+		m.optSelect.options = msg.options
+		m.optSelect.cursor = 0
+		m.state = stateOptionSelect
+		return m, nil
+
+	case confirmRequiredMsg:
+		m.inlineConfirm.prompt = msg.prompt
+		m.inlineConfirm.options = msg.options
+		if len(msg.options) < 2 {
+			m.inlineConfirm.options = []string{"Proceed", "Cancel"}
+		}
+		if msg.clear {
+			m.clsOutput = true
+		}
+		m.confirmIdx = 0
+		m.state = stateInlineConfirm
 		return m, nil
 
 	case tea.KeyMsg:
 		switch m.state {
+
+		case stateInlinePrompt:
+			switch msg.Type {
+			case tea.KeyEsc:
+				// Cancel: send empty line to unblock the recipe.
+				m.run.ptmx.Write([]byte("\n")) //nolint:errcheck
+				m.state = stateRunning
+				m.inlinePrompt = struct {
+					text   string
+					secret bool
+				}{}
+			case tea.KeyEnter:
+				resp := m.input.Value() + "\n"
+				m.run.ptmx.Write([]byte(resp)) //nolint:errcheck
+				m.state = stateRunning
+				m.inlinePrompt = struct {
+					text   string
+					secret bool
+				}{}
+			default:
+				var cmd tea.Cmd
+				m.input, cmd = m.input.Update(msg)
+				return m, cmd
+			}
+			return m, nil
+
+		case stateOptionSelect:
+			switch msg.String() {
+			case "up", "k":
+				if m.optSelect.cursor > 0 {
+					m.optSelect.cursor--
+				}
+			case "down", "j":
+				if m.optSelect.cursor < len(m.optSelect.options)-1 {
+					m.optSelect.cursor++
+				}
+			case "enter":
+				choice := m.optSelect.options[m.optSelect.cursor] + "\n"
+				m.run.ptmx.Write([]byte(choice)) //nolint:errcheck
+				m.state = stateRunning
+			case "esc":
+				// Cancel: send empty line to unblock the recipe.
+				m.run.ptmx.Write([]byte("\n")) //nolint:errcheck
+				m.state = stateRunning
+			}
+			return m, nil
+
+		case stateInlineConfirm:
+			switch msg.String() {
+			case "enter":
+				resp := m.inlineConfirm.options[m.confirmIdx] + "\n"
+				m.run.ptmx.Write([]byte(resp)) //nolint:errcheck
+				m.state = stateRunning
+			case "esc", "q":
+				// Cancel: write the cancel option to unblock the recipe.
+				cancel := m.inlineConfirm.options[1] + "\n"
+				m.run.ptmx.Write([]byte(cancel)) //nolint:errcheck
+				m.state = stateRunning
+			case "left", "h":
+				if m.confirmIdx > 0 {
+					m.confirmIdx--
+				}
+			case "right", "l":
+				if m.confirmIdx < 1 {
+					m.confirmIdx++
+				}
+			}
+			return m, nil
 
 		case stateConfirm:
 			switch msg.String() {
@@ -343,6 +530,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				var cmd tea.Cmd
 				m.spin, cmd = m.spin.Update(msg)
 				return m, cmd
+			}
+			if msg.Type == tea.KeyEsc {
+				m.run.kill()
+				m.state = stateMenu
+				return m, nil
 			}
 			switch msg.Type {
 			case tea.KeyCtrlQ:
@@ -388,29 +580,84 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 
-		default: // stateMenu, stateDone
+		case stateDone:
+			// Overlay is shown; only close or quit, no menu navigation.
+			switch msg.String() {
+			case "enter", "esc":
+				m.state = stateMenu
+				return m, nil
+			case "q", "ctrl+c":
+				return m, tea.Quit
+			}
+			return m, nil
+
+		default: // stateMenu
 			n := len(m.menuItems)
 			visible := m.menuHeight()
 
 			switch msg.String() {
 			case "up", "k":
-				if m.cursor > 0 {
-					m.cursor--
+				// Skip past headers; if the next item above is a header,
+				// keep going until we find a selectable item or hit the top.
+				moved := false
+				for m.cursor > 0 {
+					next := m.cursor - 1
+					if m.menuItems[next].kind == kindHeader {
+						above := next - 1
+						if above >= 0 && m.menuItems[above].kind != kindHeader {
+							m.cursor = above
+							moved = true
+						}
+						break
+					}
+					m.cursor = next
+					moved = true
+					break
 				}
-				// Smooth scroll: shift offset by 1 when cursor passes the
-				// top edge of the visible window.
-				if m.cursor < m.menuOfs {
+				// If cursor didn't move (already at the first selectable
+				// item), scroll the menu to show the header above it.
+				if !moved && m.menuOfs > 0 {
 					m.menuOfs--
+				}
+				// Keep the cursor visible. Clamp offset so it never goes
+				// negative or beyond the last page.
+				if visible >= n {
+					m.menuOfs = 0
+				} else {
+					for m.cursor < m.menuOfs {
+						m.menuOfs--
+					}
+					if m.menuOfs < 0 {
+						m.menuOfs = 0
+					}
+					maxOfs := n - visible
+					if m.menuOfs > maxOfs {
+						m.menuOfs = maxOfs
+					}
 				}
 
 			case "down", "j":
-				if m.cursor < n-1 {
+				for m.cursor < n-1 {
 					m.cursor++
+					if m.menuItems[m.cursor].kind != kindHeader {
+						break
+					}
 				}
-				// Smooth scroll: shift offset by 1 when cursor passes the
-				// bottom edge of the visible window.
-				if m.cursor >= m.menuOfs+visible {
-					m.menuOfs++
+				// Keep the cursor visible. Clamp offset so it never goes
+				// negative or beyond the last page.
+				if visible >= n {
+					m.menuOfs = 0
+				} else {
+					for m.cursor >= m.menuOfs+visible {
+						m.menuOfs++
+					}
+					maxOfs := n - visible
+					if m.menuOfs > maxOfs {
+						m.menuOfs = maxOfs
+					}
+					if m.menuOfs < 0 {
+						m.menuOfs = 0
+					}
 				}
 
 			case "enter":
@@ -422,7 +669,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, tea.Quit
 				}
 
-			case "q", "ctrl+c", "esc":
+			case "q", "ctrl+c":
+				return m, tea.Quit
+
+			case "esc":
 				return m, tea.Quit
 			}
 			return m, nil
@@ -493,8 +743,8 @@ func (m model) viewOverlay() string {
 	}
 	content.WriteString(status + "\n")
 
-	if m.run != nil {
-		content.WriteString("\n" + m.run.emu.Render() + "\n")
+	if m.run != nil && !m.clsOutput {
+		content.WriteString("\n" + strings.TrimRight(m.run.emu.Render(), "\n ") + "\n")
 	}
 
 	if m.spinOn {
@@ -502,25 +752,192 @@ func (m model) viewOverlay() string {
 	}
 
 	if m.progOn {
+		if m.progLabel != "" {
+			content.WriteString(docStyle.Render(m.progLabel) + "\n")
+		}
 		content.WriteString(m.prog.ViewAs(float64(m.progPct)/100) + "\n")
 	}
 
 	if m.state == stateRunning {
 		content.WriteString(helpStyle.Render("keys go to the recipe · ctrl+q kill · ctrl+t full terminal"))
 	} else {
-		content.WriteString(helpStyle.Render("recipe finished · ↑/↓ navigate · enter run · q quit"))
+		content.WriteString(helpStyle.Render("recipe finished · enter close · ↑/↓ navigate · q quit"))
 	}
 
-	ow := m.width - 4
-	if ow < 20 {
-		ow = 40
+	return content.String()
+}
+
+// viewOverlayWithConfirm renders the running overlay with an embedded
+// two-button confirmation popup (OSC 9;7) between the CLI output and
+// the progress bar, centred horizontally. Button labels come from the
+// recipe via the optional 4th field of the OSC sequence.
+func (m model) viewOverlayWithConfirm() string {
+	labels := m.inlineConfirm.options
+	if len(labels) < 2 {
+		labels = []string{"Proceed", "Cancel"}
 	}
-	overlayStyle := lipgloss.NewStyle().
+	var content strings.Builder
+
+	status := selStyle.Render(m.running)
+	content.WriteString(status + "\n")
+
+	// Emulator output sits above the prompt (skipped if cleared via clear_cli).
+	// Trim trailing empty lines so the confirm prompt doesn't get
+	// pushed to the bottom when there's little or no output.
+	if m.run != nil && !m.clsOutput {
+		emuOut := strings.TrimRight(m.run.emu.Render(), "\n ")
+		if emuOut != "" {
+			content.WriteString("\n" + emuOut + "\n")
+		}
+	}
+
+	if m.spinOn {
+		content.WriteString(m.spin.View() + " " + docStyle.Render("waiting for progress...") + "\n")
+	}
+
+	// Confirmation prompt and buttons, centred in the overlay,
+	// between emulator output and progress bar.
+	prompt := m.inlineConfirm.prompt
+	if prompt != "" {
+		content.WriteString(lipgloss.NewStyle().Width(m.overlayWidth()-4).Align(lipgloss.Center).Render(prompt) + "\n")
+	}
+
+	var opt1, opt2 string
+	if m.confirmIdx == 0 {
+		opt1 = selStyle.Render("▸ "+labels[0]) + " "
+	} else {
+		opt1 = "  " + labels[0] + "  "
+	}
+	if m.confirmIdx == 1 {
+		opt2 = selStyle.Render("▸ "+labels[1]) + " "
+	} else {
+		opt2 = "  " + labels[1] + "  "
+	}
+	btnRow := lipgloss.NewStyle().Width(m.overlayWidth() - 4).Align(lipgloss.Center).Render(opt1 + opt2)
+	content.WriteString(btnRow + "\n")
+
+	if m.progOn {
+		if m.progLabel != "" {
+			content.WriteString(docStyle.Render(m.progLabel) + "\n")
+		}
+		content.WriteString(m.prog.ViewAs(float64(m.progPct)/100) + "\n")
+	}
+
+	content.WriteString(helpStyle.Render("← → navigate · enter confirm · esc cancel"))
+
+	return content.String()
+}
+
+// viewOverlayWithPrompt renders the running overlay with an embedded prompt
+// form above the emulator output.
+func (m model) viewOverlayWithPrompt() string {
+	var content strings.Builder
+
+	status := selStyle.Render(m.running)
+	content.WriteString(status + "\n")
+
+	// Emulator output sits above the prompt.
+	if m.run != nil && !m.clsOutput {
+		emuOut := strings.TrimRight(m.run.emu.Render(), "\n ")
+		if emuOut != "" {
+			content.WriteString("\n" + emuOut + "\n")
+		}
+	}
+
+	if m.spinOn {
+		content.WriteString(m.spin.View() + " " + docStyle.Render("waiting for progress...") + "\n")
+	}
+
+	// Prompt: styled label + input field, between CLI output and progress bar.
+	promptLabel := m.inlinePrompt.text
+	if promptLabel == "" {
+		promptLabel = "Input:"
+	}
+	inputView := m.input.View()
+	if m.inlinePrompt.secret {
+		inputView = strings.Repeat("●", len(m.input.Value()))
+	}
+	promptRow := lipgloss.NewStyle().Width(m.overlayWidth() - 4).Align(lipgloss.Left).
+		Render(selStyle.Render(promptLabel) + " " + inputView)
+	content.WriteString("\n" + promptRow + "\n")
+
+	if m.progOn {
+		if m.progLabel != "" {
+			content.WriteString(docStyle.Render(m.progLabel) + "\n")
+		}
+		content.WriteString(m.prog.ViewAs(float64(m.progPct)/100) + "\n")
+	}
+
+	content.WriteString(helpStyle.Render("enter confirm · esc cancel"))
+
+	return content.String()
+}
+
+// overlayView renders an overlay state: builds a bordered foreground from
+// content + style variant, composites it over the system panel and menu
+// (centered horizontally and vertically). styleFn customizes the base
+// bordered style per state (e.g. Padding, Align).
+func (m model) overlayView(bgBase, content, bgHelp string, styleFn func(lipgloss.Style) lipgloss.Style) string {
+	// Build the foreground with border and width.
+	base := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(accent).
-		Padding(0, 1).
-		Width(ow)
-	return "\n" + overlayStyle.Render(content.String())
+		Width(m.overlayWidth())
+	fg := styleFn(base).Render(content)
+
+	// Build the background: system panel + menu + help text.
+	menu := m.viewMenu()
+	bg := bgBase + menu + helpStyle.Render(bgHelp)
+
+	// Composite foreground over background with centering.
+	fgLines := strings.Split(fg, "\n")
+	bgLines := strings.Split(bg, "\n")
+	fgW := lipgloss.Width(fg)
+	fgH := len(fgLines)
+
+	for len(bgLines) < m.height {
+		bgLines = append(bgLines, "")
+	}
+
+	x := (m.width - fgW) / 2
+	if x < 0 {
+		x = 0
+	}
+
+	y := (m.height - fgH) / 2
+	if y < 0 {
+		y = 0
+	}
+
+	out := make([]string, len(bgLines))
+	for i, bgLine := range bgLines {
+		if i >= y && i < y+fgH {
+			fgLine := fgLines[i-y]
+			fgLineW := ansi.StringWidth(fgLine)
+
+			left := ansi.Truncate(bgLine, x, "")
+			leftW := ansi.StringWidth(left)
+			if leftW < x {
+				left += strings.Repeat(" ", x-leftW)
+			}
+
+			rightStart := x + fgLineW
+			right := ansi.TruncateLeft(bgLine, rightStart, "")
+
+			line := left + fgLine + right
+			if lw := ansi.StringWidth(line); lw < m.width {
+				line += strings.Repeat(" ", m.width-lw)
+			}
+			out[i] = line
+		} else {
+			if lw := ansi.StringWidth(bgLine); lw < m.width {
+				out[i] = bgLine + strings.Repeat(" ", m.width-lw)
+			} else {
+				out[i] = bgLine
+			}
+		}
+	}
+	return strings.Join(out, "\n")
 }
 
 func (m model) View() string {
@@ -536,29 +953,20 @@ func (m model) View() string {
 	switch m.state {
 	case stateSelect:
 		paramName := m.pending.Params[len(m.pArgs)]
-		selStr := "\n" + selStyle.Render(m.pending.Name) +
+		body := "\n" + selStyle.Render(m.pending.Name) +
 			docStyle.Render(" > ") + labelStyle.Render(paramName) + "\n\n"
 		for i, opt := range m.selOpts {
 			if i == m.selCur {
-				selStr += selStyle.Render("▸ "+opt) + "\n"
+				body += selStyle.Render("▸ "+opt) + "\n"
 			} else {
-				selStr += "  " + docStyle.Render(opt) + "\n"
+				body += "  " + docStyle.Render(opt) + "\n"
 			}
 		}
-		b.WriteString(selStr)
-		b.WriteString(helpStyle.Render("↑/↓ navigate · enter select · esc cancel"))
+		body += helpStyle.Render("↑/↓ navigate · enter select · esc cancel")
+		return m.overlayView(b.String(), body, "↑/↓ select · enter run · q quit",
+			func(s lipgloss.Style) lipgloss.Style { return s.Padding(0, 1) })
 
 	case stateConfirm:
-		confirmStyle := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(accent).
-			Padding(1, 2).
-			Align(lipgloss.Center).
-			Width(m.width - 6)
-		if m.width < 20 {
-			confirmStyle = confirmStyle.Width(40)
-		}
-
 		prompt := m.pending.Confirm
 		for i, p := range m.pending.Params {
 			if i < len(m.pArgs) {
@@ -585,67 +993,75 @@ func (m model) View() string {
 			"\n\n"+proceed+cancel,
 			helpStyle.Render("← → navigate · enter confirm · esc cancel"),
 		)
-		b.WriteString("\n" + confirmStyle.Render(body) + "\n")
+		return m.overlayView(b.String(), body, "↑/↓ select · enter run · q quit",
+			func(s lipgloss.Style) lipgloss.Style {
+				return s.Padding(1, 2).Align(lipgloss.Center)
+			})
 
 	case statePrompt:
-		formStr := "\n" + selStyle.Render(m.pending.Name) + "\n\n"
+		body := "\n" + selStyle.Render(m.pending.Name) + "\n\n"
 		for i, p := range m.pending.Params {
 			paramLabel := labelStyle.Render(p)
 			if i < len(m.pArgs) {
-				formStr += fmt.Sprintf("  %s %s  %s\n",
+				body += fmt.Sprintf("  %s %s  %s\n",
 					okStyle.Render("✓"),
 					paramLabel,
 					docStyle.Render(m.pArgs[i]),
 				)
 			} else if i == len(m.pArgs) {
-				formStr += fmt.Sprintf("  %s %s %s\n",
+				body += fmt.Sprintf("  %s %s %s\n",
 					selStyle.Render("⌨"),
 					paramLabel,
 					m.input.View(),
 				)
 			} else {
-				formStr += fmt.Sprintf("  %s %s  %s\n",
+				body += fmt.Sprintf("  %s %s  %s\n",
 					docStyle.Render("·"),
 					paramLabel,
 					docStyle.Render("…"),
 				)
 			}
 		}
-		b.WriteString(formStr)
-		b.WriteString(helpStyle.Render("enter confirm · esc cancel"))
+		body += helpStyle.Render("enter confirm · esc cancel")
+		return m.overlayView(b.String(), body, "↑/↓ select · enter run · q quit",
+			func(s lipgloss.Style) lipgloss.Style { return s.Padding(0, 1) })
+
+	case stateOptionSelect:
+		selStr := "\n" + selStyle.Render(m.running) + "\n\n"
+		if m.optSelect.prompt != "" {
+			selStr += docStyle.Render(m.optSelect.prompt) + "\n\n"
+		}
+		for i, opt := range m.optSelect.options {
+			if i == m.optSelect.cursor {
+				selStr += selStyle.Render("▸ "+opt) + "\n"
+			} else {
+				selStr += "  " + docStyle.Render(opt) + "\n"
+			}
+		}
+		body := selStr + "\n" + helpStyle.Render("↑/↓ navigate · enter select · esc cancel")
+		return m.overlayView(b.String(), body, "↑/↓ select · enter run · q quit",
+			func(s lipgloss.Style) lipgloss.Style { return s.Padding(0, 1) })
+
+	case stateInlinePrompt:
+		return m.overlayView(b.String(), m.viewOverlayWithPrompt(), "↑/↓ select · enter run · q quit",
+			func(s lipgloss.Style) lipgloss.Style { return s.Padding(0, 1) })
+
+	case stateInlineConfirm:
+		return m.overlayView(b.String(), m.viewOverlayWithConfirm(), "↑/↓ select · enter run · q quit",
+			func(s lipgloss.Style) lipgloss.Style { return s.Padding(0, 1).AlignVertical(lipgloss.Center) })
 
 	case stateRunning:
 		if m.isSilent() {
-			status := selStyle.Render(m.running)
-			b.WriteString("\n" + status + "\n")
-			if m.spinOn {
-				b.WriteString(m.spin.View() + " " + docStyle.Render("waiting for progress...") + "\n")
-			}
-			if m.progOn {
-				b.WriteString(m.prog.ViewAs(float64(m.progPct)/100) + "\n")
-			}
 			b.WriteString(m.viewMenu())
 			b.WriteString(helpStyle.Render("ctrl+q kill"))
 		} else {
-			b.WriteString(m.viewOverlay())
+			return m.overlayView(b.String(), m.viewOverlay(), "↑/↓ select · enter run · q quit",
+				func(s lipgloss.Style) lipgloss.Style { return s.Padding(0, 1) })
 		}
 
 	case stateDone:
-		if m.isSilent() {
-			status := selStyle.Render(m.running)
-			if m.exitCode == 0 {
-				status += " " + okStyle.Render("✓ "+exitLabel(m.exitCode))
-			} else {
-				status += " " + errStyle.Render("✗ "+exitLabel(m.exitCode))
-			}
-			b.WriteString("\n" + status + "\n")
-			b.WriteString(m.viewMenu())
-			b.WriteString(helpStyle.Render("↑/↓ select · enter run · q quit"))
-		} else {
-			b.WriteString(m.viewOverlay())
-			b.WriteString("\n" + m.viewMenu())
-			b.WriteString(helpStyle.Render("↑/↓ select · enter run · q quit"))
-		}
+		return m.overlayView(b.String(), m.viewOverlay(), "enter close · ↑/↓ select · q quit",
+			func(s lipgloss.Style) lipgloss.Style { return s.Padding(0, 1) })
 
 	default:
 		b.WriteString(m.viewMenu())
