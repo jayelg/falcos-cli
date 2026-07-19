@@ -125,11 +125,6 @@ func fastfetchInfo() ([]infoField, error) {
 			if osLine == "" {
 				osLine = r.PrettyName + " " + r.VersionID
 			}
-			// Append architecture from uname.
-			var un unix.Utsname
-			if unix.Uname(&un) == nil {
-				osLine += " " + unix.ByteSliceToString(un.Machine[:])
-			}
 			fields = append(fields, infoField{"OS", osLine})
 
 		case "Kernel":
@@ -502,7 +497,6 @@ func gatherInfo() []infoField {
 	kernel := "n/a"
 	if err := unix.Uname(&un); err == nil {
 		kernel = unix.ByteSliceToString(un.Release[:])
-		osLine += " " + unix.ByteSliceToString(un.Machine[:])
 	}
 	mi := meminfo()
 
