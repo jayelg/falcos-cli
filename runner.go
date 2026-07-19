@@ -208,7 +208,6 @@ func (r *runner) resizePTY(w, h int) {
 	r.emu.Resize(w, h)
 }
 
-
 func (r *runner) kill() {
 	if r.cmd != nil && r.cmd.Process != nil {
 		r.cmd.Process.Kill() //nolint:errcheck

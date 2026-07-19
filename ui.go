@@ -21,9 +21,9 @@ const (
 	stateConfirm         // showing a proceed/cancel confirmation popup
 	stateRunning
 	stateDone
-	stateInlinePrompt    // mid-execution text/password prompt from the recipe
-	stateOptionSelect    // mid-execution option selector (OSC 9;6) from the recipe
-	stateInlineConfirm   // mid-execution confirm (OSC 9;7) from the recipe
+	stateInlinePrompt  // mid-execution text/password prompt from the recipe
+	stateOptionSelect  // mid-execution option selector (OSC 9;6) from the recipe
+	stateInlineConfirm // mid-execution confirm (OSC 9;7) from the recipe
 )
 
 var (
@@ -66,30 +66,30 @@ const (
 
 type menuItem struct {
 	kind   itemKind
-	recipe recipe   // populated for kindRecipe
-	group  string   // populated for kindHeader
+	recipe recipe // populated for kindRecipe
+	group  string // populated for kindHeader
 }
 
 // ── model ─────────────────────────────────────────────────────
 
 type model struct {
-	state    uiState
-	fields   []infoField
-	recipes  []recipe
-	run      *runner
-	running  string // recipe name being/last run
-	exitCode int
-	width    int
-	height   int
-	prog     progress.Model
-	progPct  int
-	progOn   bool
+	state     uiState
+	fields    []infoField
+	recipes   []recipe
+	run       *runner
+	running   string // recipe name being/last run
+	exitCode  int
+	width     int
+	height    int
+	prog      progress.Model
+	progPct   int
+	progOn    bool
 	progLabel string // phase label from recipe (e.g. "Downloading...")
-	input    textinput.Model
-	pending  recipe   // recipe awaiting parameters
-	pArgs    []string // collected parameter values
-	autorun  []string // CLI args: recipe to start immediately
-	cliMode  bool     // true = running from CLI args, not interactive menu
+	input     textinput.Model
+	pending   recipe   // recipe awaiting parameters
+	pArgs     []string // collected parameter values
+	autorun   []string // CLI args: recipe to start immediately
+	cliMode   bool     // true = running from CLI args, not interactive menu
 
 	confirmIdx int // 0 = proceed (default), 1 = cancel
 
@@ -227,12 +227,12 @@ func (m *model) paneSize() (w, h int) {
 // Scales proportionally with terminal width so the overlay is always
 // centered with equal visible margin.
 func (m *model) overlayWidth() int {
-	w := m.width * 3 / 4    // 75% of terminal
+	w := m.width * 3 / 4 // 75% of terminal
 	if w > 100 {
-		w = 100               // cap for very wide terminals
+		w = 100 // cap for very wide terminals
 	}
 	if w < 40 {
-		w = 40                // floor for narrow terminals
+		w = 40 // floor for narrow terminals
 	}
 	return w
 }

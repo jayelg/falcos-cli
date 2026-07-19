@@ -176,9 +176,9 @@ func fastfetchInfo() ([]infoField, error) {
 
 		case "DE":
 			var r struct {
-				Name        string `json:"name"`
-				PrettyName  string `json:"prettyName"`
-				Version     string `json:"version"`
+				Name       string `json:"name"`
+				PrettyName string `json:"prettyName"`
+				Version    string `json:"version"`
 			}
 			if json.Unmarshal(e.Result, &r) != nil {
 				continue
@@ -280,7 +280,7 @@ func fastfetchInfo() ([]infoField, error) {
 						continue
 					}
 					seen[key] = true
-					fields = append(fields, infoField{"Disk ("+mp+")", usedTotal(d.Bytes.Used, d.Bytes.Total)})
+					fields = append(fields, infoField{"Disk (" + mp + ")", usedTotal(d.Bytes.Used, d.Bytes.Total)})
 				}
 			}
 
