@@ -47,6 +47,13 @@ func osName() string {
 	return "falcos"
 }
 
+// buildTag is the image build tag shown next to the OS name in the heading
+// (os-release IMAGE_VERSION, e.g. 20260718). Empty when the image doesn't
+// set it.
+func buildTag() string {
+	return osRelease()["IMAGE_VERSION"]
+}
+
 func run(name string, args ...string) string {
 	out, err := exec.Command(name, args...).Output()
 	if err != nil {

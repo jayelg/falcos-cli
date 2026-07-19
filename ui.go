@@ -986,7 +986,11 @@ func (m model) View() string {
 		}
 	}
 
-	b.WriteString(titleStyle.Render("● "+osName()) + "\n")
+	title := titleStyle.Render("● " + osName())
+	if tag := buildTag(); tag != "" {
+		title += " " + docStyle.Render(tag)
+	}
+	b.WriteString(title + "\n")
 
 	sysLines := m.sysInfoHeight()
 	b.WriteString(m.viewPanel(sysLines))
