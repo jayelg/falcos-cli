@@ -140,6 +140,8 @@ func newModel(recipes []recipe, autorun []string) model {
 		}
 		items = append(items, menuItem{kind: kindRecipe, recipe: r})
 	}
+	// Empty group header acts as a visual separator before exit.
+	items = append(items, menuItem{kind: kindHeader, group: ""})
 	items = append(items, menuItem{kind: kindExit})
 
 	// Set initial cursor to the first selectable item (skip group headers).
