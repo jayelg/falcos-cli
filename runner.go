@@ -21,10 +21,6 @@ import (
 // full-screen child (tea.Program.ReleaseTerminal/RestoreTerminal).
 var program *tea.Program
 
-// strippedJustfile is set from main to the path of a justfile copy with
-// custom attributes removed, so just 1.55+ can parse it.
-var strippedJustfile string
-
 type ptyDataMsg []byte
 type recipeExitMsg struct{ code int }
 type handoverDoneMsg struct{}
@@ -50,23 +46,25 @@ type summaryMsg struct {
 	text string // one line of summary output from the recipe
 }
 type summaryShowMsg struct{}
+type summaryClearMsg struct{}
+type cliVisibilityMsg struct {
+	visible bool // true = show CLI output, false = hide
+}
 
 type runner struct {
 	cmd      *exec.Cmd
 	ptmx     *os.File
 	emu      *vt.Emulator
-	handover atomic.Bool  // raw passthrough active, reader bypasses the emulator
+	handover atomic.Bool    // raw passthrough active, reader bypasses the emulator
 	output   strings.Builder // raw PTY output accumulated for save-to-log
 }
 
-// startRecipe launches `just [flags...] <recipe> [args...]` on a PTY sized
-// to the output pane, feeding output into a vt emulator for embedded
-// rendering. extraFlags are just flags (e.g. --yes) inserted before the
-// recipe name.
-func startRecipe(name string, args []string, w, h int, prog *tea.Program, extraFlags ...string) (*runner, error) {
+// startRecipe launches `just <recipe> [args...]` on a PTY sized to the output
+// pane, feeding output into a vt emulator for embedded rendering.
+func startRecipe(name string, args []string, w, h int, prog *tea.Program, justfile string) (*runner, error) {
 	r := &runner{emu: vt.NewEmulator(w, h)}
 
-	// OSC 9 dispatcher: sub-identifier 4 = progress, 5 = prompt, 6 = option select.
+	// OSC 9 dispatcher: sub-identifier maps to UI component helpers.
 	// Async Send: handler runs inside emu.Write which runs inside Update;
 	// synchronous Send would deadlock on the message loop.
 	r.emu.RegisterOscHandler(9, func(data []byte) bool {
@@ -109,15 +107,18 @@ func startRecipe(name string, args []string, w, h int, prog *tea.Program, extraF
 			clear := len(parts) > 4 && parts[4] == "1"
 			go prog.Send(confirmRequiredMsg{prompt: prompt, options: opts, clear: clear})
 			return true
-		case "8": // clear CLI output from overlay: ESC ] 9 ; 8 ST
-			// Deprecated — clear is now part of OSC 9;7's 5th field.
-			// Kept for backward compatibility.
+		case "8": // cli visibility: ESC ] 9 ; 8 ; <state> ST  (0=hide, 1=show)
+			visible := parts[2] == "1"
+			go prog.Send(cliVisibilityMsg{visible: visible})
 			return true
 		case "10": // summary: ESC ] 9 ; 10 ; <text> ST
 			go prog.Send(summaryMsg{text: parts[2]})
 			return true
 		case "11": // summary show: ESC ] 9 ; 11 ST
 			go prog.Send(summaryShowMsg{})
+			return true
+		case "12": // summary clear: ESC ] 9 ; 12 ST
+			go prog.Send(summaryClearMsg{})
 			return true
 		}
 		return false
@@ -132,9 +133,8 @@ func startRecipe(name string, args []string, w, h int, prog *tea.Program, extraF
 		},
 	})
 
-	cmdArgs := append(extraFlags, "--justfile", strippedJustfile, name)
-	cmdArgs = append(cmdArgs, args...)
-	r.cmd = exec.Command("just", cmdArgs...)
+	r.cmd = exec.Command("just", "--justfile", justfile, name)
+	r.cmd.Args = append(r.cmd.Args, args...)
 	r.cmd.Env = append(os.Environ(), "TERM=xterm-256color")
 
 	ptmx, err := pty.StartWithSize(r.cmd, &pty.Winsize{Rows: uint16(h), Cols: uint16(w)})

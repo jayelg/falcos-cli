@@ -17,8 +17,6 @@ type uiState int
 const (
 	stateMenu    uiState = iota
 	statePrompt          // collecting a recipe parameter (freeform text)
-	stateSelect          // collecting a recipe parameter (choose from options)
-	stateConfirm         // showing a proceed/cancel confirmation popup
 	stateRunning
 	stateDone
 	stateInlinePrompt  // mid-execution text/password prompt from the recipe
@@ -90,8 +88,7 @@ type model struct {
 	pArgs     []string // collected parameter values
 	autorun   []string // CLI args: recipe to start immediately
 	cliMode   bool     // true = running from CLI args, not interactive menu
-
-	confirmIdx int // 0 = proceed (default), 1 = cancel
+	justfile  string   // path to the system justfile
 
 	inlinePrompt struct {
 		text   string // prompt text to display
@@ -113,10 +110,8 @@ type model struct {
 		options []string // two button labels [opt1, opt2]
 	}
 
-	clsOutput bool // true = skip emulator render (set by confirm clear field)
-
-	selOpts []string // selectable options for the active parameter
-	selCur  int      // cursor into selOpts
+	cliHidden bool // true when recipe hides CLI output via OSC 9;8
+	confirmIdx int  // 0 = proceed (default), 1 = cancel (for inline confirm)
 
 	menuItems    []menuItem      // flat list: headers + recipes + exit
 	cursor       int             // selected index into menuItems
@@ -131,7 +126,7 @@ type model struct {
 	showSummary   bool     // OSC 9;11 triggered: render summary now
 }
 
-func newModel(recipes []recipe, autorun []string) model {
+func newModel(recipes []recipe, autorun []string, justfile string) model {
 	ti := textinput.New()
 	ti.CharLimit = 128
 	fi := textinput.New()
@@ -173,6 +168,7 @@ func newModel(recipes []recipe, autorun []string) model {
 		spin:        s,
 		autorun:     autorun,
 		cliMode:     len(autorun) > 0,
+		justfile:    justfile,
 		menuItems:   items,
 		cursor:      firstSel,
 	}
@@ -266,14 +262,11 @@ func (m *model) overlayWidth() int {
 
 func (m *model) startRecipe(name string, args []string) tea.Cmd {
 	w, h := m.paneSize()
-	var extraFlags []string
-	if m.pending.Confirm != "" {
-		extraFlags = []string{"--yes"}
-	}
 	m.summaryLines = nil
 	m.showSummary = false
 	m.lastSavedPath = ""
-	rn, err := startRecipe(name, args, w, h, program, extraFlags...)
+	m.cliHidden = false
+	rn, err := startRecipe(name, args, w, h, program, m.justfile)
 	if err != nil {
 		m.state = stateDone
 		m.exitCode = 1
@@ -284,44 +277,22 @@ func (m *model) startRecipe(name string, args []string) tea.Cmd {
 	m.state = stateRunning
 	m.progOn = false
 	m.seenOut = false
-	if m.pending.Progress {
-		m.spinOn = true
-		return m.spin.Tick
-	}
-	m.spinOn = false
-	return nil
+	m.spinOn = true
+	return m.spin.Tick
 }
 
-// isSilent returns true when the running recipe suppresses the CLI overlay.
-func (m *model) isSilent() bool {
-	return m.pending.Silent && !m.pending.Progress
-}
-
-// selectRecipe starts the recipe, prompts for parameters, or shows a
-// confirmation popup, depending on the recipe's declaration.
+// selectRecipe prompts for parameters, then starts the recipe.
 func (m *model) selectRecipe(r recipe, preArgs []string) tea.Cmd {
 	m.pending = r
 	m.pArgs = preArgs
 
 	if len(preArgs) < len(r.Params) {
 		nextParam := r.Params[len(preArgs)]
-		if opts, ok := r.Select[nextParam]; ok && len(opts) > 0 {
-			m.selOpts = opts
-			m.selCur = 0
-			m.state = stateSelect
-			return nil
-		}
 		m.input.Placeholder = nextParam
 		m.input.SetValue("")
 		m.input.Focus()
 		m.state = statePrompt
 		return textinput.Blink
-	}
-
-	if r.Confirm != "" {
-		m.confirmIdx = 0
-		m.state = stateConfirm
-		return nil
 	}
 
 	return m.startRecipe(r.Name, preArgs)
@@ -423,6 +394,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.showSummary = true
 		return m, nil
 
+	case summaryClearMsg:
+		m.summaryLines = nil
+		m.showSummary = false
+		return m, nil
+
+	case cliVisibilityMsg:
+		m.cliHidden = !msg.visible
+		return m, nil
+
 	case recipeExitMsg:
 		m.exitCode = msg.code
 		if m.progPct < 100 {
@@ -434,9 +414,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.cliMode {
 			return m, tea.Quit
 		}
-		// Silent recipes go straight back to menu so the user can
-		// immediately select another recipe without an extra Enter.
-		if m.pending.Silent {
+		// Recipes that hid CLI output go straight back to menu so the
+		// user can immediately select another recipe.
+		if m.cliHidden {
 			m.state = stateMenu
 		} else {
 			m.state = stateDone
@@ -478,9 +458,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.inlineConfirm.options = []string{"Proceed", "Cancel"}
 		}
 		if msg.clear {
-			m.clsOutput = true
+			m.cliHidden = true
 		}
-		m.confirmIdx = 0
+		m.confirmIdx = 0 // reused field for confirm button index
 		m.state = stateInlineConfirm
 		return m, nil
 
@@ -593,24 +573,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 
-		case stateConfirm:
-			switch msg.String() {
-			case "enter":
-				return m, m.startRecipe(m.pending.Name, m.pArgs)
-			case "esc", "q":
-				m.state = stateMenu
-				return m, nil
-			case "left", "h":
-				if m.confirmIdx > 0 {
-					m.confirmIdx--
-				}
-			case "right", "l":
-				if m.confirmIdx < 1 {
-					m.confirmIdx++
-				}
-			}
-			return m, nil
-
 		case stateRunning:
 			if m.spinOn {
 				var cmd tea.Cmd
@@ -657,25 +619,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			var cmd tea.Cmd
 			m.input, cmd = m.input.Update(msg)
 			return m, cmd
-
-		case stateSelect:
-			switch msg.String() {
-			case "up", "k":
-				if m.selCur > 0 {
-					m.selCur--
-				}
-			case "down", "j":
-				if m.selCur < len(m.selOpts)-1 {
-					m.selCur++
-				}
-			case "enter":
-				m.pArgs = append(m.pArgs, m.selOpts[m.selCur])
-				return m, m.selectRecipe(m.pending, m.pArgs)
-			case "esc":
-				m.state = stateMenu
-				return m, nil
-			}
-			return m, nil
 
 		case stateDone:
 			switch msg.String() {
@@ -960,12 +903,12 @@ func (m model) viewOverlay() string {
 	}
 	content.WriteString(status + "\n")
 
-	if m.run != nil && !m.clsOutput {
+	if m.run != nil && !m.cliHidden {
 		content.WriteString("\n" + strings.TrimRight(m.run.emu.Render(), "\n ") + "\n")
 	}
 
-	// Summary lines: explicit show, CLI cleared, or successful completion.
-	if m.showSummary || m.clsOutput || (m.state == stateDone && m.exitCode == 0) {
+	// Summary lines: explicit show, CLI hidden, or successful completion.
+	if m.showSummary || m.cliHidden || (m.state == stateDone && m.exitCode == 0) {
 		content.WriteString(m.viewSummary())
 	}
 
@@ -1012,10 +955,10 @@ func (m model) viewOverlayWithConfirm() string {
 	status := selStyle.Render(m.running)
 	content.WriteString(status + "\n")
 
-	// Emulator output sits above the prompt (skipped if cleared via clear_cli).
+	// Emulator output sits above the prompt (skipped if CLI hidden).
 	// Trim trailing empty lines so the confirm prompt doesn't get
 	// pushed to the bottom when there's little or no output.
-	if m.run != nil && !m.clsOutput {
+	if m.run != nil && !m.cliHidden {
 		emuOut := strings.TrimRight(m.run.emu.Render(), "\n ")
 		if emuOut != "" {
 			content.WriteString("\n" + emuOut + "\n")
@@ -1027,7 +970,7 @@ func (m model) viewOverlayWithConfirm() string {
 	}
 
 	// Summary lines from OSC 9;10, shown above the confirm prompt.
-	if m.showSummary || m.clsOutput {
+	if m.showSummary || m.cliHidden {
 		content.WriteString(m.viewSummary())
 	}
 
@@ -1073,7 +1016,7 @@ func (m model) viewOverlayWithPrompt() string {
 	content.WriteString(status + "\n")
 
 	// Emulator output sits above the prompt.
-	if m.run != nil && !m.clsOutput {
+	if m.run != nil && !m.cliHidden {
 		emuOut := strings.TrimRight(m.run.emu.Render(), "\n ")
 		if emuOut != "" {
 			content.WriteString("\n" + emuOut + "\n")
@@ -1085,7 +1028,7 @@ func (m model) viewOverlayWithPrompt() string {
 	}
 
 	// Summary lines from OSC 9;10, shown above the prompt.
-	if m.showSummary || m.clsOutput {
+	if m.showSummary || m.cliHidden {
 		content.WriteString(m.viewSummary())
 	}
 
@@ -1226,53 +1169,6 @@ func (m model) View() string {
 	b.WriteString("\n")
 
 	switch m.state {
-	case stateSelect:
-		paramName := m.pending.Params[len(m.pArgs)]
-		body := "\n" + selStyle.Render(m.pending.Name) +
-			docStyle.Render(" > ") + labelStyle.Render(paramName) + "\n\n"
-		for i, opt := range m.selOpts {
-			if i == m.selCur {
-				body += selStyle.Render("▸ "+opt) + "\n"
-			} else {
-				body += "  " + docStyle.Render(opt) + "\n"
-			}
-		}
-		body += helpStyle.Render("↑/↓ navigate · enter select · esc cancel")
-		return m.overlayView(b.String(), body, "↑/↓ select · enter run · q quit",
-			func(s lipgloss.Style) lipgloss.Style { return s.Padding(0, 1) })
-
-	case stateConfirm:
-		prompt := m.pending.Confirm
-		for i, p := range m.pending.Params {
-			if i < len(m.pArgs) {
-				prompt = strings.ReplaceAll(prompt, "{{"+p+"}}", m.pArgs[i])
-			}
-		}
-
-		proceed := " Proceed "
-		cancel := " Cancel "
-		if m.confirmIdx == 0 {
-			proceed = selStyle.Render("▸ Proceed ") + " "
-		} else {
-			proceed = "  Proceed  "
-		}
-		if m.confirmIdx == 1 {
-			cancel = selStyle.Render("▸ Cancel ") + " "
-		} else {
-			cancel = "  Cancel  "
-		}
-
-		body := fmt.Sprintf("%s\n\n%s%s\n\n%s",
-			selStyle.Render(m.pending.Name),
-			prompt,
-			"\n\n"+proceed+cancel,
-			helpStyle.Render("← → navigate · enter confirm · esc cancel"),
-		)
-		return m.overlayView(b.String(), body, "↑/↓ select · enter run · q quit",
-			func(s lipgloss.Style) lipgloss.Style {
-				return s.Padding(1, 2).Align(lipgloss.Center)
-			})
-
 	case statePrompt:
 		body := "\n" + selStyle.Render(m.pending.Name) + "\n\n"
 		for i, p := range m.pending.Params {
@@ -1326,7 +1222,7 @@ func (m model) View() string {
 			func(s lipgloss.Style) lipgloss.Style { return s.Padding(0, 1).AlignVertical(lipgloss.Center) })
 
 	case stateRunning:
-		if m.isSilent() {
+		if m.cliHidden {
 			b.WriteString(m.viewMenu())
 			b.WriteString(helpStyle.Render("ctrl+q kill"))
 		} else {

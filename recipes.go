@@ -2,129 +2,24 @@ package main
 
 import (
 	"encoding/json"
-	"os"
 	"os/exec"
 	"regexp"
 	"strings"
 )
 
 type recipe struct {
-	Name     string
-	Doc      string
-	Group    string
-	Params   []string
-	Confirm  string              // confirmation prompt; empty = no confirmation needed
-	Progress bool                // recipe emits OSC 9;4 progress sequences
-	Silent   bool                // suppress CLI overlay during execution
-	Select   map[string][]string // parameter name -> selectable options, empty = freeform text
-}
-
-// customAttrs matches custom just attributes that just 1.55+ rejects
-// as unknown. These are stripped before passing to just --dump/--list.
-var customAttrs = regexp.MustCompile(`^\s*\[(silent|progress|select\(.*\))\]`)
-
-// rawAttrs parses custom attributes from the raw justfile text,
-// mapping recipe name -> parsed attributes. Only handles attributes that
-// just 1.55+ rejects (silent, progress, select). confirm and group are
-// handled by just natively.
-func rawAttrs(content string) map[string]map[string]string {
-	// Track the most recent attribute and the next recipe name.
-	type pendingAttr struct {
-		key string
-		val string
-	}
-	var pending []pendingAttr
-	result := make(map[string]map[string]string)
-
-	recipeRe := regexp.MustCompile(`^([a-zA-Z][a-zA-Z0-9_-]*)\s*:`)
-	attrRe := regexp.MustCompile(`^\s*\[(silent|progress|select\(([^)]*)\))\]`)
-
-	for _, line := range strings.Split(content, "\n") {
-		if m := attrRe.FindStringSubmatch(line); m != nil {
-			switch m[1] {
-			case "silent":
-				pending = append(pending, pendingAttr{key: "silent", val: "true"})
-			case "progress":
-				pending = append(pending, pendingAttr{key: "progress", val: "true"})
-			default:
-				if strings.HasPrefix(m[1], "select(") {
-					pending = append(pending, pendingAttr{key: "select", val: m[2]})
-				}
-			}
-			continue
-		}
-		if m := recipeRe.FindStringSubmatch(line); m != nil {
-			name := m[1]
-			if _, ok := result[name]; !ok {
-				result[name] = make(map[string]string)
-			}
-			for _, p := range pending {
-				result[name][p.key] = p.val
-			}
-			pending = nil
-		}
-	}
-	return result
-}
-
-// stripCustomAttrs removes custom attribute lines from the justfile
-// content so that just 1.55+ (which rejects unknown attributes) can parse it.
-func stripCustomAttrs(content string) string {
-	var b strings.Builder
-	for _, line := range strings.Split(content, "\n") {
-		if customAttrs.MatchString(line) {
-			continue
-		}
-		if b.Len() > 0 {
-			b.WriteString("\n")
-		}
-		b.WriteString(line)
-	}
-	return b.String()
-}
-
-// strippedJustfilePath reads the justfile, strips custom attributes,
-// writes the result to a temp file, and returns the temp file path. The caller
-// must remove the returned path when done. On error, returns the original path.
-func strippedJustfilePath(orig string) string {
-	raw, err := os.ReadFile(orig)
-	if err != nil {
-		return orig
-	}
-	stripped := stripCustomAttrs(string(raw))
-	tmpFile, err := os.CreateTemp("", "goojust-*.just")
-	if err != nil {
-		return orig
-	}
-	if _, err := tmpFile.WriteString(stripped); err != nil {
-		tmpFile.Close()
-		os.Remove(tmpFile.Name())
-		return orig
-	}
-	tmpFile.Close()
-	return tmpFile.Name()
+	Name   string
+	Doc    string
+	Group  string
+	Params []string
 }
 
 // loadRecipes reads public recipes from the justfile, ordered by their
 // position in the file (from `just --list`), with details from
 // `just --dump --dump-format json`.
 func loadRecipes(justfile string) ([]recipe, error) {
-	raw, err := os.ReadFile(justfile)
-	if err != nil {
-		return nil, err
-	}
-	content := string(raw)
-
-	// Extract custom attributes from the raw text before stripping.
-	customAttrs := rawAttrs(content)
-
-	// Use a stripped copy so just 1.55+ (which rejects unknown attributes)
-	// can parse the justfile.
-	jf := strippedJustfilePath(justfile)
-	defer os.Remove(jf)
-
-	// Recipe details (doc, group, params) from JSON dump on stripped file.
-	out, err := exec.Command("just", "--justfile", jf,
+	// Recipe details (doc, group, params) from JSON dump.
+	out, err := exec.Command("just", "--justfile", justfile,
 		"--dump", "--dump-format", "json").Output()
 	if err != nil {
 		return nil, err
@@ -143,7 +38,7 @@ func loadRecipes(justfile string) ([]recipe, error) {
 	}
 
 	// Recipe order from `just --list --unsorted`.
-	listOut, err := exec.Command("just", "--justfile", jf, "--list", "--unsorted").Output()
+	listOut, err := exec.Command("just", "--justfile", justfile, "--list", "--unsorted").Output()
 	if err != nil {
 		return nil, err
 	}
@@ -200,7 +95,9 @@ func loadRecipes(justfile string) ([]recipe, error) {
 		}
 	}
 
-	// Build the flat recipe list, merging custom attributes from raw parsing.
+	// Build the flat recipe list. Only [group] is used as a justfile
+	// attribute; all UI feedback (confirm, progress, silent, prompt,
+	// choose, summary) is driven at runtime via OSC helpers.
 	seen := map[string]bool{}
 	var rs []recipe
 	for _, g := range groupOrder {
@@ -214,39 +111,6 @@ func loadRecipes(justfile string) ([]recipe, error) {
 			for _, p := range r.Parameters {
 				rec.Params = append(rec.Params, p.Name)
 			}
-
-			// Parse standard just attributes (confirm is native in just 1.55+).
-			for _, attr := range r.Attributes {
-				if m, ok := attr.(map[string]any); ok {
-					if confirm, ok := m["confirm"].(string); ok {
-						rec.Confirm = confirm
-					}
-				}
-			}
-
-			// Merge custom attributes parsed from raw text.
-			if ca, ok := customAttrs[name]; ok {
-				if ca["silent"] == "true" {
-					rec.Silent = true
-				}
-				if ca["progress"] == "true" {
-					rec.Progress = true
-				}
-				if sel, ok := ca["select"]; ok && sel != "" {
-					param, opts, _ := strings.Cut(sel, ":")
-					if param != "" && opts != "" {
-						if rec.Select == nil {
-							rec.Select = make(map[string][]string)
-						}
-						for _, o := range strings.Split(opts, "|") {
-							if o != "" {
-								rec.Select[param] = append(rec.Select[param], o)
-							}
-						}
-					}
-				}
-			}
-
 			rs = append(rs, rec)
 		}
 	}

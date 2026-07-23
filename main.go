@@ -1,13 +1,14 @@
 // goojust: an OS TUI for system info and running just recipes (aliased to
-// the os-release NAME, e.g. the OS NAME). No args: system panel + recipe menu.
-// With args: runs that recipe in the TUI's output pane. Non-TTY invocations
-// pass through to plain `just`.
+// the os-release NAME). No args: system panel + recipe menu. With args: runs
+// that recipe in the TUI's output pane. Non-TTY invocations pass through to
+// plain `just`.
 package main
 
 import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -19,24 +20,17 @@ var version = "dev"
 
 const defaultJustfile = "/usr/share/goojust/justfile"
 
-func justfilePath() string {
-	if p := os.Getenv("GOOJUST_JUSTFILE"); p != "" {
-		return p
-	}
-	return defaultJustfile
-}
-
 const helpText = `goojust — OS TUI for system info and running just recipes.
 
 Usage:
-  goojust                  Launch interactive TUI (system panel + recipe menu)
-  goojust <recipe> [args]  Run a recipe in the embedded terminal pane
-  goojust --version        Print version and exit
-  goojust --help           Print this help and exit
+  goojust [flags]                  Launch interactive TUI
+  goojust [flags] <recipe> [args]  Run a recipe in the embedded terminal pane
+  goojust --version                Print version and exit
+  goojust --help                   Print this help and exit
 
-Configuration:
-  GOOJUST_JUSTFILE         Path to the system justfile (default /usr/share/goojust/justfile)
-  GOOJUST_PLAIN            Set to bypass the TUI and exec just directly
+Flags:
+  --justfile <path>  Path to the system justfile (default /usr/share/goojust/justfile)
+  --plain            Bypass the TUI and exec just directly
 
 Keybindings (TUI):
   ↑/↓ or j/k    Navigate recipe menu
@@ -50,27 +44,41 @@ Keybindings (TUI):
 `
 
 func main() {
+	justfile := defaultJustfile
+	plain := false
 	args := os.Args[1:]
 
-	// Flags that work regardless of TTY.
-	if len(args) == 1 {
-		switch args[0] {
-		case "--version", "-V":
+	// Parse flags before the recipe name. Remaining args after flags are
+	// the recipe name and its arguments.
+	var remaining []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--version" || a == "-V":
 			fmt.Println("goojust", version)
 			os.Exit(0)
-		case "--help", "-h":
+		case a == "--help" || a == "-h":
 			fmt.Print(helpText)
 			os.Exit(0)
+		case a == "--plain":
+			plain = true
+		case a == "--justfile":
+			i++
+			if i < len(args) {
+				justfile = args[i]
+			}
+		case strings.HasPrefix(a, "--justfile="):
+			justfile = strings.TrimPrefix(a, "--justfile=")
+		default:
+			// First non-flag argument starts the recipe + its args.
+			remaining = append(remaining, args[i:]...)
+			i = len(args) // break
 		}
 	}
 
 	// Scripts and pipes get plain just behaviour, no TUI.
-	if !term.IsTerminal(int(os.Stdout.Fd())) || os.Getenv("GOOJUST_PLAIN") != "" {
-		// Use a stripped copy so just 1.55+ (which rejects unknown
-		// attributes) can parse the justfile. Temp file cleaned up
-		// by the OS when the process is replaced via syscall.Exec.
-		jf := strippedJustfilePath(justfilePath())
-		justArgs := append([]string{"just", "--justfile", jf}, args...)
+	if !term.IsTerminal(int(os.Stdout.Fd())) || plain {
+		justArgs := append([]string{"just", "--justfile", justfile}, remaining...)
 		bin, err := exec.LookPath("just")
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "just not found")
@@ -82,31 +90,28 @@ func main() {
 		}
 	}
 
-	// Create a stripped copy for recipe execution (runner.go).
-	strippedJustfile = strippedJustfilePath(justfilePath())
-
-	recipes, err := loadRecipes(justfilePath())
+	recipes, err := loadRecipes(justfile)
 	if err != nil {
 		// Launch TUI with system info only; show error where the menu
 		// would be so the user can still see the panel.
 		recipes = nil
 	}
 
-	m := newModel(recipes, args)
+	m := newModel(recipes, remaining, justfile)
 	if err != nil {
 		m.loadError = fmt.Sprintf("loading recipes: %v", err)
 	}
 	// Validate CLI recipe name early so the user gets a clear error
 	// instead of a silent exit 127 after the TUI starts.
-	if len(args) > 0 {
-		name := args[0]
+	if len(remaining) > 0 {
+		name := remaining[0]
 		if _, ok := m.recipeByName(name); !ok {
 			fmt.Fprintf(os.Stderr, "goojust: unknown recipe %q\n", name)
 			os.Exit(127)
 		}
 	}
 	opts := []tea.ProgramOption{tea.WithAltScreen(), tea.WithMouseAllMotion()}
-	if len(args) > 0 {
+	if len(remaining) > 0 {
 		// CLI mode: no alt-screen so output stays inline in the terminal
 		// scrollback. Program exits when the recipe finishes.
 		opts = nil
