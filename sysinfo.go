@@ -101,7 +101,7 @@ func rootDiskPath() string {
 // or returns an error.
 func fastfetchInfo() ([]infoField, error) {
 	out, err := exec.Command("fastfetch", "--format", "json", "--structure",
-		"os:kernel:uptime:de:packages:cpu:gpu:memory:swap:disk:localip",
+		"os:kernel:uptime:de:packages:cpu:cputemp:gpu:gputemp:memory:swap:disk:localip:battery",
 	).Output()
 	if err != nil {
 		return nil, err
@@ -222,6 +222,21 @@ func fastfetchInfo() ([]infoField, error) {
 			}
 			fields = append(fields, infoField{"CPU", cpu})
 
+		case "CPUTemp":
+			var r struct {
+				Temp float64 `json:"temp"`
+			}
+			if json.Unmarshal(e.Result, &r) != nil {
+				continue
+			}
+			// Append temp to the CPU line if present.
+			for i := len(fields) - 1; i >= 0; i-- {
+				if fields[i].Label == "CPU" {
+					fields[i].Value += fmt.Sprintf("  %d°C", int(r.Temp))
+					break
+				}
+			}
+
 		case "GPU":
 			var gpus []struct {
 				Name   string `json:"name"`
@@ -237,6 +252,24 @@ func fastfetchInfo() ([]infoField, error) {
 					val += " [" + g.Driver + "]"
 				}
 				fields = append(fields, infoField{label, val})
+			}
+
+		case "GPUTemp":
+			var temps []struct {
+				Temp  float64 `json:"temp"`
+				Index int     `json:"index"`
+			}
+			if json.Unmarshal(e.Result, &temps) != nil {
+				continue
+			}
+			for _, t := range temps {
+				label := fmt.Sprintf("GPU %d", t.Index+1)
+				for i := range fields {
+					if fields[i].Label == label {
+						fields[i].Value += fmt.Sprintf("  %d°C", int(t.Temp))
+						break
+					}
+				}
 			}
 
 		case "Memory":
@@ -309,6 +342,22 @@ func fastfetchInfo() ([]infoField, error) {
 					break
 				}
 			}
+
+		case "Battery":
+			var bats []struct {
+				Capacity float64 `json:"capacity"`
+				Status   string  `json:"status"`
+			}
+			if json.Unmarshal(e.Result, &bats) != nil {
+				continue
+			}
+			for _, b := range bats {
+				status := b.Status
+				if status == "" {
+					status = "unknown"
+				}
+				fields = append(fields, infoField{"Battery", fmt.Sprintf("%.0f%% (%s)", b.Capacity, status)})
+			}
 		}
 	}
 	if len(fields) == 0 {
@@ -324,7 +373,7 @@ func publicIP() string {
 	if err != nil {
 		return ""
 	}
-	req.Header.Set("User-Agent", "falcos-cli/1.0")
+	req.Header.Set("User-Agent", "goojust/1.0")
 	c := &http.Client{Transport: &http.Transport{
 		DisableKeepAlives: true,
 	}}
