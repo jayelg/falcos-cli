@@ -44,7 +44,7 @@ func osName() string {
 	if n := osRelease()["NAME"]; n != "" {
 		return n
 	}
-	return "falcos"
+	return "linux"
 }
 
 // buildTag is the image build tag shown next to the OS name in the heading

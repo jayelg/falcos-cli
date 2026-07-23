@@ -19,7 +19,7 @@ bindir="${2:-/usr/bin}"
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 install -Dm755 "${here}/goojust" "${dest}/${bindir}/goojust"
-install -Dm755 "${here}/scripts/falcos-progress" "${dest}/usr/libexec/goojust-progress"
+install -Dm755 "${here}/scripts/goojust-progress" "${dest}/usr/libexec/goojust-progress"
 install -Dm644 "${here}/scripts/goojust-helpers.sh" "${dest}/usr/share/goojust/goojust-helpers.sh"
 
-echo "Installed goojust, falcos-progress, goojust-helpers.sh"
+echo "Installed goojust, goojust-progress, goojust-helpers.sh"

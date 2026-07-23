@@ -1,4 +1,4 @@
-module github.com/jayelg/falcos-cli
+module github.com/jayelg/goojust
 
 go 1.25.4
 

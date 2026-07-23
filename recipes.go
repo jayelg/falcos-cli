@@ -19,11 +19,11 @@ type recipe struct {
 	Select   map[string][]string // parameter name -> selectable options, empty = freeform text
 }
 
-// falcosAttrs matches falcos-specific just attributes that just 1.55+ rejects
+// customAttrs matches custom just attributes that just 1.55+ rejects
 // as unknown. These are stripped before passing to just --dump/--list.
-var falcosAttrs = regexp.MustCompile(`^\s*\[(silent|progress|select\(.*\))\]`)
+var customAttrs = regexp.MustCompile(`^\s*\[(silent|progress|select\(.*\))\]`)
 
-// rawAttrs parses falcos-specific attributes from the raw justfile text,
+// rawAttrs parses custom attributes from the raw justfile text,
 // mapping recipe name -> parsed attributes. Only handles attributes that
 // just 1.55+ rejects (silent, progress, select). confirm and group are
 // handled by just natively.
@@ -67,12 +67,12 @@ func rawAttrs(content string) map[string]map[string]string {
 	return result
 }
 
-// stripFalcosAttrs removes falcos-specific attribute lines from the justfile
+// stripCustomAttrs removes custom attribute lines from the justfile
 // content so that just 1.55+ (which rejects unknown attributes) can parse it.
-func stripFalcosAttrs(content string) string {
+func stripCustomAttrs(content string) string {
 	var b strings.Builder
 	for _, line := range strings.Split(content, "\n") {
-		if falcosAttrs.MatchString(line) {
+		if customAttrs.MatchString(line) {
 			continue
 		}
 		if b.Len() > 0 {
@@ -83,7 +83,7 @@ func stripFalcosAttrs(content string) string {
 	return b.String()
 }
 
-// strippedJustfilePath reads the justfile, strips falcos-specific attributes,
+// strippedJustfilePath reads the justfile, strips custom attributes,
 // writes the result to a temp file, and returns the temp file path. The caller
 // must remove the returned path when done. On error, returns the original path.
 func strippedJustfilePath(orig string) string {
@@ -91,8 +91,8 @@ func strippedJustfilePath(orig string) string {
 	if err != nil {
 		return orig
 	}
-	stripped := stripFalcosAttrs(string(raw))
-	tmpFile, err := os.CreateTemp("", "falcos-justfile-*.just")
+	stripped := stripCustomAttrs(string(raw))
+	tmpFile, err := os.CreateTemp("", "goojust-*.just")
 	if err != nil {
 		return orig
 	}
@@ -115,7 +115,7 @@ func loadRecipes(justfile string) ([]recipe, error) {
 	}
 	content := string(raw)
 
-	// Extract falcos-specific attributes from the raw text before stripping.
+	// Extract custom attributes from the raw text before stripping.
 	customAttrs := rawAttrs(content)
 
 	// Use a stripped copy so just 1.55+ (which rejects unknown attributes)
@@ -224,7 +224,7 @@ func loadRecipes(justfile string) ([]recipe, error) {
 				}
 			}
 
-			// Merge falcos-specific attributes parsed from raw text.
+			// Merge custom attributes parsed from raw text.
 			if ca, ok := customAttrs[name]; ok {
 				if ca["silent"] == "true" {
 					rec.Silent = true

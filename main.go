@@ -1,5 +1,5 @@
 // goojust: an OS TUI for system info and running just recipes (aliased to
-// the os-release NAME, e.g. `falcos`). No args: system panel + recipe menu.
+// the os-release NAME, e.g. the OS NAME). No args: system panel + recipe menu.
 // With args: runs that recipe in the TUI's output pane. Non-TTY invocations
 // pass through to plain `just`.
 package main
@@ -29,10 +29,10 @@ func justfilePath() string {
 const helpText = `goojust — OS TUI for system info and running just recipes.
 
 Usage:
-  falcos                  Launch interactive TUI (system panel + recipe menu)
-  falcos <recipe> [args]  Run a recipe in the embedded terminal pane
-  falcos --version        Print version and exit
-  falcos --help           Print this help and exit
+  goojust                  Launch interactive TUI (system panel + recipe menu)
+  goojust <recipe> [args]  Run a recipe in the embedded terminal pane
+  goojust --version        Print version and exit
+  goojust --help           Print this help and exit
 
 Configuration:
   GOOJUST_JUSTFILE         Path to the system justfile (default /usr/share/goojust/justfile)

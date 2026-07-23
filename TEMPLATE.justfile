@@ -43,7 +43,7 @@ update:
     flatpak update -y
     prog 100 "Complete"
     prog clear
-    summary "System: falcos-20260722 → falcos-20260723"
+    summary "System: image-20260722 → image-20260723"
     summary "Flatpak: org.example.App 1.0 → 1.1"
     summary_show
     if [[ "$(confirm "Restart now to apply updates?" "Restart now|Later" 1)" == "Restart now" ]]; then

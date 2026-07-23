@@ -22,7 +22,7 @@ import (
 var program *tea.Program
 
 // strippedJustfile is set from main to the path of a justfile copy with
-// falcos-specific attributes removed, so just 1.55+ can parse it.
+// custom attributes removed, so just 1.55+ can parse it.
 var strippedJustfile string
 
 type ptyDataMsg []byte
@@ -283,9 +283,9 @@ func keyBytes(k tea.KeyMsg) []byte {
 }
 
 // saveOutput writes the accumulated PTY output to a timestamped log file
-// under ~/.local/share/falcos/logs/ and returns the path.
+// under ~/.local/share/goojust/logs/ and returns the path.
 func (r *runner) saveOutput(name string) (string, error) {
-	dir := filepath.Join(os.Getenv("HOME"), ".local", "share", "falcos", "logs")
+	dir := filepath.Join(os.Getenv("HOME"), ".local", "share", "goojust", "logs")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return "", err
 	}

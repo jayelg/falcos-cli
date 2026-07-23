@@ -1,7 +1,7 @@
 #!/usr/bin/bash
-# Emit OSC 9;4 progress sequence for the falcos-cli TUI.
-# Usage: falcos-progress <pct> [label]
-#        falcos-progress clear
+# Emit OSC 9;4 progress sequence for the goojust TUI.
+# Usage: goojust-progress <pct> [label]
+#        goojust-progress clear
 #
 # <pct>  0-100  percentage complete
 # label  optional phase label shown above the bar (e.g. "Downloading...")

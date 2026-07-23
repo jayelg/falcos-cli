@@ -1,8 +1,8 @@
 #!/usr/bin/bash
-# falcos-helpers.sh — Runtime UI helpers for goojust recipes.
+# goojust-helpers.sh — Runtime UI helpers for goojust recipes.
 # Source this at the top of any recipe that uses UI interactions:
 #
-#   source scripts/falcos-helpers.sh
+#   source /usr/share/goojust/goojust-helpers.sh
 #
 # Then call helpers directly without defining them inline:
 #

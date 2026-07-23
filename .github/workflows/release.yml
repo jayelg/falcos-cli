@@ -34,13 +34,12 @@ jobs:
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
           asset="goojust-v${version}-x86_64-linux-gnu.tar.gz"
-          # Bundle the binary, runtime helpers, and install script so the
-          # falcos image installs everything from one artifact.
+          # Bundle the binary, runtime helpers, and install script
           tar -czf "$asset" \
             goojust \
             install.sh \
             scripts/goojust-helpers.sh \
-            scripts/falcos-progress
+            scripts/goojust-progress
           sha256sum "$asset" | cut -d' ' -f1 > "${asset}.sha256"
           echo "asset=${asset}" >> "$GITHUB_OUTPUT"
 

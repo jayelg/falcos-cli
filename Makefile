@@ -1,12 +1,12 @@
-# Install scripts into the falcos build tree for inclusion in the image.
+# Install scripts into the target image build tree.
 # Default path assumes both repos are cloned side by side; override with
-# FALCOS_REPO, e.g.:
-#   make install-helpers FALCOS_REPO=/home/pc/Projects/falcos
-FALCOS_REPO ?= ../falcos
+# IMAGE_REPO, e.g.:
+#   make install-helpers IMAGE_REPO=/path/to/target-image-repo
+IMAGE_REPO ?= ../target-image-repo
 
 # Destination paths mirror the image layout under build_files/files/common/.
-HELPERS_DEST  = $(FALCOS_REPO)/build_files/files/common/usr/share/goojust/goojust-helpers.sh
-PROGRESS_DEST = $(FALCOS_REPO)/build_files/files/common/usr/libexec/goojust-progress
+HELPERS_DEST  = $(IMAGE_REPO)/build_files/files/common/usr/share/goojust/goojust-helpers.sh
+PROGRESS_DEST = $(IMAGE_REPO)/build_files/files/common/usr/libexec/goojust-progress
 
 .PHONY: install-helpers
 install-helpers: $(HELPERS_DEST) $(PROGRESS_DEST)
@@ -16,7 +16,7 @@ $(HELPERS_DEST): scripts/goojust-helpers.sh
 	chmod 644 $@
 	@echo "Installed goojust-helpers.sh"
 
-$(PROGRESS_DEST): scripts/falcos-progress
+$(PROGRESS_DEST): scripts/goojust-progress
 	cp $< $@
 	chmod 755 $@
-	@echo "Installed falcos-progress"
+	@echo "Installed goojust-progress"

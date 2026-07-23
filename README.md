@@ -1,11 +1,11 @@
 # goojust
 
 An OS TUI for system info and running `just` recipes, for
-[falcos](https://github.com/jayelg/falcos) and other bootc images. Run it with
+bootc-based Linux images. Run it with
 no arguments for a system panel plus a menu of the image's `just` recipes; pass
 a recipe name to run one directly.
 
-It is aliased to the OS name in the image (so on falcos you type `falcos`), read
+It is aliased to the OS name in the image (so on the image you type the OS name), read
 from `/etc/os-release` so the command follows a rebrand.
 
 ## What it shows
@@ -23,11 +23,11 @@ panel when it exits.
 
 Recipes can drive the bottom progress bar by emitting an
 [OSC 9;4](https://learn.microsoft.com/en-us/windows/terminal/tutorials/progress-bar-sequences)
-progress sequence (falcos ships a `falcos-progress` helper for this); the
+progress sequence (a `goojust-progress` helper is included for this); the
 sequence is ignored by plain terminals.
 
-- `falcos` — panel + menu
-- `falcos <recipe> [args]` — run a recipe in the pane
+- `goojust` — panel + menu
+- `goojust <recipe> [args]` — run a recipe in the pane
 - non-interactive (piped, scripted) invocations pass straight through to `just`
 
 ## Configuration
@@ -74,20 +74,20 @@ The user navigates with ←/→ and confirms with Enter or cancels with Esc.
 
 Add a `[progress]` attribute to indicate the recipe emits OSC 9;4 progress
 sequences. The TUI shows a gradient progress bar at the bottom of the output
-pane while the recipe runs. Use the `falcos-progress` helper (shipped with
-falcos) inside the recipe:
+pane while the recipe runs. Use the `goojust-progress` helper (included with
+the image) inside the recipe:
 
 ```just
 [progress]
 update-system:
-    falcos-progress 10 "Checking updates..."
+    goojust-progress 10 "Checking updates..."
     # ... update commands ...
-    falcos-progress 50 "Downloading..."
+    goojust-progress 50 "Downloading..."
     # ... more commands ...
-    falcos-progress 100 "Done!"
+    goojust-progress 100 "Done!"
 ```
 
-The `falcos-progress` helper emits the standard OSC 9;4 terminal sequence:
+The `goojust-progress` helper emits the standard OSC 9;4 terminal sequence:
 
 ```
 printf '\e]9;4;1;%%s\e\\' "$pct"    # set progress to pct%
@@ -97,7 +97,7 @@ printf '\e]9;4;0;0\e\\'              # clear progress bar
 ### 4. Inline prompts (during execution)
 
 For prompts that happen mid-recipe (not just parameters), recipes call the
-`falcos-prompt` helper which emits an OSC 9;5 sequence. The TUI intercepts it
+`goojust-prompt` helper which emits an OSC 9;5 sequence. The TUI intercepts it
 and shows a focused input overlay. After the user responds, the value is written
 back to the recipe's input.
 
@@ -105,8 +105,8 @@ back to the recipe's input.
 [progress]
 setup-dotfiles:
     #!/usr/bin/bash
-    repo=$(falcos-prompt "Dotfiles repo URL:"; read -r)
-    branch=$(falcos-prompt "Branch:"; read -r)
+    repo=$(goojust-prompt "Dotfiles repo URL:"; read -r)
+    branch=$(goojust-prompt "Branch:"; read -r)
     echo "Cloning $repo branch $branch..."
 ```
 
@@ -115,19 +115,19 @@ Password prompts pass `secret` as a second argument to mask input:
 ```just
 setup-vpn:
     #!/usr/bin/bash
-    user=$(falcos-prompt "VPN username:"; read -r)
-    pass=$(falcos-prompt "VPN password:" secret; read -rs)
+    user=$(goojust-prompt "VPN username:"; read -r)
+    pass=$(goojust-prompt "VPN password:" secret; read -rs)
     echo "Configuring VPN for $user..."
 ```
 
-The `falcos-prompt` helper emits the OSC 9;5 terminal sequence:
+The `goojust-prompt` helper emits the OSC 9;5 terminal sequence:
 
 ```
 printf '\e]9;5;%s;%s\e\\' "$text" "$secret"    # prompt with optional secret mode
 ```
 
-The recipe calls `falcos-prompt` followed by `read` (or `read -rs` for secrets).
-`falcos-prompt` emits the OSC synchronously and returns; the TUI intercepts it
+The recipe calls `goojust-prompt` followed by `read` (or `read -rs` for secrets).
+`goojust-prompt` emits the OSC synchronously and returns; the TUI intercepts it
 before the `read` blocks, shows the prompt overlay, and writes the user's
 response to the PTY on submit.
 
@@ -139,9 +139,9 @@ All attributes can be combined freely on a single recipe:
 [confirm("Install {{PACKAGE}} on this system?")]
 [progress]
 install-package PACKAGE:
-    falcos-progress 10 "Preparing..."
+    goojust-progress 10 "Preparing..."
     rpm-ostree install {{PACKAGE}}
-    falcos-progress 100 "Done!"
+    goojust-progress 100 "Done!"
 ```
 
 ### 6. Silent execution
@@ -185,13 +185,13 @@ User selects recipe
   ↓
 Recipe starts in PTY pane (CLI overlay)
   ↓
-┌─ falcos-prompt? ──→ Show inline prompt overlay
+┌─ goojust-prompt? ──→ Show inline prompt overlay
 │                       (user responds → written to PTY)
 │                       ↓ Loop back to running state
 └── No ←────────────┘
   ↓
 ┌─ [progress]? ──→ Progress bar rendered below CLI output
-│                    (falcos-progress helper)
+│                    (goojust-progress helper)
 └── No ←────────┘
   ↓
 Recipe exits → exit status + return to menu
@@ -210,7 +210,7 @@ CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o goojust .
 ```
 
 A single static binary, no cgo. Releases publish a prebuilt
-`x86_64-unknown-linux-gnu` tarball with a `.sha256` sidecar; falcos consumes
+`x86_64-unknown-linux-gnu` tarball with a `.sha256` sidecar; images consume
 that pinned by version and checksum.
 
 ## License
