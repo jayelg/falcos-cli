@@ -5,16 +5,16 @@
 FALCOS_REPO ?= ../falcos
 
 # Destination paths mirror the image layout under build_files/files/common/.
-HELPERS_DEST  = $(FALCOS_REPO)/build_files/files/common/usr/share/falcos/falcos-helpers.sh
-PROGRESS_DEST = $(FALCOS_REPO)/build_files/files/common/usr/libexec/falcos-progress
+HELPERS_DEST  = $(FALCOS_REPO)/build_files/files/common/usr/share/goojust/goojust-helpers.sh
+PROGRESS_DEST = $(FALCOS_REPO)/build_files/files/common/usr/libexec/goojust-progress
 
 .PHONY: install-helpers
 install-helpers: $(HELPERS_DEST) $(PROGRESS_DEST)
 
-$(HELPERS_DEST): scripts/falcos-helpers.sh
+$(HELPERS_DEST): scripts/goojust-helpers.sh
 	cp $< $@
 	chmod 644 $@
-	@echo "Installed falcos-helpers.sh"
+	@echo "Installed goojust-helpers.sh"
 
 $(PROGRESS_DEST): scripts/falcos-progress
 	cp $< $@

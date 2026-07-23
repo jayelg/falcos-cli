@@ -24,20 +24,22 @@ jobs:
         env:
           CGO_ENABLED: '0'
           GOFLAGS: '-mod=readonly'
-        run: go build -trimpath -ldflags="-s -w" -o falcos-cli .
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          go build -trimpath -ldflags="-s -w -X main.version=${version}" -o goojust .
 
       - name: Package with checksum
         id: pkg
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
-          asset="falcos-cli-v${version}-x86_64-linux-gnu.tar.gz"
+          asset="goojust-v${version}-x86_64-linux-gnu.tar.gz"
           # Bundle the binary, runtime helpers, and install script so the
           # falcos image installs everything from one artifact.
           tar -czf "$asset" \
-            falcos-cli \
+            goojust \
             install.sh \
-            scripts/falcos-helpers.sh \
+            scripts/goojust-helpers.sh \
             scripts/falcos-progress
           sha256sum "$asset" | cut -d' ' -f1 > "${asset}.sha256"
           echo "asset=${asset}" >> "$GITHUB_OUTPUT"

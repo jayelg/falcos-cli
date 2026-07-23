@@ -1,4 +1,4 @@
-# falcos-cli
+# goojust
 
 An OS TUI for system info and running `just` recipes, for
 [falcos](https://github.com/jayelg/falcos) and other bootc images. Run it with
@@ -32,9 +32,9 @@ sequence is ignored by plain terminals.
 
 ## Configuration
 
-- `FALCOS_JUSTFILE` — path to the system justfile (default
-  `/usr/share/falcos/justfile`)
-- `FALCOS_PLAIN` — set to bypass the TUI and exec `just` directly
+- `GOOJUST_JUSTFILE` — path to the system justfile (default
+  `/usr/share/goojust/justfile`)
+- `GOOJUST_PLAIN` — set to bypass the TUI and exec `just` directly
 
 ## UI Integration Convention
 
@@ -206,7 +206,7 @@ Copy it as a starting point for your own image's justfile.
 ## Building
 
 ```bash
-CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o falcos-cli .
+CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o goojust .
 ```
 
 A single static binary, no cgo. Releases publish a prebuilt
