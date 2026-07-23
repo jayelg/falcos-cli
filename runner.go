@@ -5,9 +5,11 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/vt"
@@ -44,12 +46,17 @@ type confirmRequiredMsg struct {
 	options []string // two button labels: [opt1, opt2]
 	clear   bool     // true = clear emulator output before showing
 }
+type summaryMsg struct {
+	text string // one line of summary output from the recipe
+}
+type summaryShowMsg struct{}
 
 type runner struct {
 	cmd      *exec.Cmd
 	ptmx     *os.File
 	emu      *vt.Emulator
-	handover atomic.Bool // raw passthrough active, reader bypasses the emulator
+	handover atomic.Bool  // raw passthrough active, reader bypasses the emulator
+	output   strings.Builder // raw PTY output accumulated for save-to-log
 }
 
 // startRecipe launches `just [flags...] <recipe> [args...]` on a PTY sized
@@ -106,6 +113,12 @@ func startRecipe(name string, args []string, w, h int, prog *tea.Program, extraF
 			// Deprecated — clear is now part of OSC 9;7's 5th field.
 			// Kept for backward compatibility.
 			return true
+		case "10": // summary: ESC ] 9 ; 10 ; <text> ST
+			go prog.Send(summaryMsg{text: parts[2]})
+			return true
+		case "11": // summary show: ESC ] 9 ; 11 ST
+			go prog.Send(summaryShowMsg{})
+			return true
 		}
 		return false
 	})
@@ -137,6 +150,7 @@ func startRecipe(name string, args []string, w, h int, prog *tea.Program, extraF
 		for {
 			n, err := ptmx.Read(buf)
 			if n > 0 {
+				r.output.Write(buf[:n])
 				if r.handover.Load() {
 					os.Stdout.Write(buf[:n])
 				} else {
@@ -266,6 +280,19 @@ func keyBytes(k tea.KeyMsg) []byte {
 		return []byte{0x12}
 	}
 	return nil
+}
+
+// saveOutput writes the accumulated PTY output to a timestamped log file
+// under ~/.local/share/falcos/logs/ and returns the path.
+func (r *runner) saveOutput(name string) (string, error) {
+	dir := filepath.Join(os.Getenv("HOME"), ".local", "share", "falcos", "logs")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return "", err
+	}
+	ts := time.Now().Format("20060102-150405")
+	filename := fmt.Sprintf("%s-%s.log", name, ts)
+	path := filepath.Join(dir, filename)
+	return path, os.WriteFile(path, []byte(r.output.String()), 0644)
 }
 
 func exitLabel(code int) string {

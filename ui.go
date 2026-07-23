@@ -118,14 +118,26 @@ type model struct {
 	selOpts []string // selectable options for the active parameter
 	selCur  int      // cursor into selOpts
 
-	menuItems []menuItem // flat list: headers + recipes + exit
-	cursor    int        // selected index into menuItems
-	menuOfs   int        // first visible menu line index (smooth scroll)
+	menuItems    []menuItem      // flat list: headers + recipes + exit
+	cursor       int             // selected index into menuItems
+	menuOfs      int             // first visible menu line index (smooth scroll)
+	filterInput   textinput.Model // search/filter bar above the recipe menu
+	filterText    string          // current filter string (lowercased for matching)
+	filterVisible bool            // true when the search bar is shown
+
+	lastSavedPath string   // path of the last saved log file, shown as feedback
+	loadError     string   // non-empty when recipe loading failed; shown instead of menu
+	summaryLines  []string // OSC 9;10 summary lines from the recipe
+	showSummary   bool     // OSC 9;11 triggered: render summary now
 }
 
 func newModel(recipes []recipe, autorun []string) model {
 	ti := textinput.New()
 	ti.CharLimit = 128
+	fi := textinput.New()
+	fi.CharLimit = 64
+	fi.Placeholder = "Filter recipes..."
+	fi.Prompt = "🔍 "
 	s := spinner.New()
 	s.Style = lipgloss.NewStyle().Foreground(accent)
 	s.Spinner = spinner.Dot
@@ -154,14 +166,15 @@ func newModel(recipes []recipe, autorun []string) model {
 	}
 
 	return model{
-		recipes:   recipes,
-		prog:      progress.New(progress.WithDefaultGradient()),
-		input:     ti,
-		spin:      s,
-		autorun:   autorun,
-		cliMode:   len(autorun) > 0,
-		menuItems: items,
-		cursor:    firstSel,
+		recipes:     recipes,
+		prog:        progress.New(progress.WithDefaultGradient()),
+		input:       ti,
+		filterInput: fi,
+		spin:        s,
+		autorun:     autorun,
+		cliMode:     len(autorun) > 0,
+		menuItems:   items,
+		cursor:      firstSel,
 	}
 }
 
@@ -200,11 +213,15 @@ func (m model) sysInfoHeight() int {
 	return maxFit
 }
 
-// menuHeight returns how many menu lines fit below the sysinfo panel
-// and the gap line.
+// menuHeight returns how many menu lines fit below the sysinfo panel,
+// gap line, and optional search bar.
 func (m model) menuHeight() int {
 	sys := m.sysInfoHeight()
-	h := m.height - 1 - sys - 1 - 1 // title, gap, help
+	extra := 1 // gap
+	if m.filterVisible {
+		extra++ // search bar
+	}
+	h := m.height - 1 - sys - extra - 1 // title, extra, help
 	if h < 1 {
 		h = 1
 	}
@@ -213,6 +230,14 @@ func (m model) menuHeight() int {
 
 func (m *model) paneSize() (w, h int) {
 	w = m.overlayWidth()
+	if m.cliMode {
+		// Full terminal height for inline CLI mode; no overlay caps.
+		h = m.height - 1
+		if h < 5 {
+			h = 5
+		}
+		return w, h
+	}
 	sysLines := m.sysInfoHeight()
 	available := m.height - 2 - sysLines - 2
 	h = available
@@ -245,6 +270,9 @@ func (m *model) startRecipe(name string, args []string) tea.Cmd {
 	if m.pending.Confirm != "" {
 		extraFlags = []string{"--yes"}
 	}
+	m.summaryLines = nil
+	m.showSummary = false
+	m.lastSavedPath = ""
 	rn, err := startRecipe(name, args, w, h, program, extraFlags...)
 	if err != nil {
 		m.state = stateDone
@@ -387,6 +415,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.spinOn = false
 		return m, nil
 
+	case summaryMsg:
+		m.summaryLines = append(m.summaryLines, msg.text)
+		return m, nil
+
+	case summaryShowMsg:
+		m.showSummary = true
+		return m, nil
+
 	case recipeExitMsg:
 		m.exitCode = msg.code
 		if m.progPct < 100 {
@@ -446,6 +482,44 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.confirmIdx = 0
 		m.state = stateInlineConfirm
+		return m, nil
+
+	case tea.MouseMsg:
+		switch m.state {
+		case stateMenu:
+			items := m.filteredItems()
+			menuStartY := m.sysInfoHeight() + 2 // title + sysinfo + gap
+			if m.filterVisible {
+				menuStartY++ // search bar
+			}
+			switch msg.Type {
+			case tea.MouseWheelUp:
+				if m.menuOfs > 0 {
+					m.menuOfs--
+				}
+			case tea.MouseWheelDown:
+				visible := m.menuHeight()
+				if m.menuOfs+visible < len(items) {
+					m.menuOfs++
+				}
+			case tea.MouseMotion:
+				idx := m.menuOfs + (msg.Y - menuStartY)
+				if idx >= 0 && idx < len(items) && items[idx].kind != kindHeader {
+					m.cursor = idx
+				}
+			case tea.MouseLeft:
+				idx := m.menuOfs + (msg.Y - menuStartY)
+				if idx >= 0 && idx < len(items) {
+					mi := items[idx]
+					switch mi.kind {
+					case kindRecipe:
+						return m, m.selectRecipe(mi.recipe, nil)
+					case kindExit:
+						return m, tea.Quit
+					}
+				}
+			}
+		}
 		return m, nil
 
 	case tea.KeyMsg:
@@ -553,6 +627,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.run.kill()
 			case tea.KeyCtrlT:
 				go m.run.enterHandover(program)
+			case tea.KeyRunes:
+				if msg.String() == "s" {
+					if m.run != nil {
+						path, err := m.run.saveOutput(m.running)
+						if err == nil {
+							m.lastSavedPath = path
+						}
+					}
+				} else if b := keyBytes(msg); b != nil && m.run != nil {
+					m.run.ptmx.Write(b) //nolint:errcheck
+				}
 			default:
 				if b := keyBytes(msg); b != nil && m.run != nil {
 					m.run.ptmx.Write(b) //nolint:errcheck
@@ -593,10 +678,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case stateDone:
-			// Overlay is shown; only close or quit, no menu navigation.
 			switch msg.String() {
 			case "enter", "esc":
 				m.state = stateMenu
+				return m, nil
+			case "s":
+				if m.run != nil {
+					path, err := m.run.saveOutput(m.running)
+					if err == nil {
+						m.lastSavedPath = path
+					}
+				}
 				return m, nil
 			case "q", "ctrl+c":
 				return m, tea.Quit
@@ -604,19 +696,77 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		default: // stateMenu
-			n := len(m.menuItems)
+			// When filter is visible and focused, keys go to the filter input.
+			if m.filterVisible && m.filterInput.Focused() {
+				switch msg.Type {
+				case tea.KeyEsc:
+					m.filterVisible = false
+					m.filterInput.SetValue("")
+					m.filterText = ""
+					m.filterInput.Blur()
+					m.cursor = 0
+					m.menuOfs = 0
+					return m, nil
+				case tea.KeyEnter:
+					m.filterVisible = false
+					m.filterInput.SetValue("")
+					m.filterText = ""
+					m.filterInput.Blur()
+					items := m.filteredItems()
+					if m.cursor >= 0 && m.cursor < len(items) {
+						mi := items[m.cursor]
+						if mi.kind == kindRecipe {
+							return m, m.selectRecipe(mi.recipe, nil)
+						}
+						if mi.kind == kindExit {
+							return m, tea.Quit
+						}
+					}
+					return m, nil
+				default:
+					var cmd tea.Cmd
+					m.filterInput, cmd = m.filterInput.Update(msg)
+					m.filterText = m.filterInput.Value()
+					items := m.filteredItems()
+					if len(items) > 0 {
+						firstSel := 0
+						for i, it := range items {
+							if it.kind != kindHeader {
+								firstSel = i
+								break
+							}
+						}
+						m.cursor = firstSel
+					}
+					m.menuOfs = 0
+					return m, cmd
+				}
+			}
+
+			items := m.filteredItems()
+			n := len(items)
 			visible := m.menuHeight()
 
 			switch msg.String() {
+			case "/":
+				m.filterVisible = true
+				m.filterInput.Focus()
+				m.filterInput.SetValue("")
+				m.filterText = ""
+				return m, textinput.Blink
+
+			case "r":
+				// Refresh system info.
+				m.fields = nil
+				return m, func() tea.Msg { return infoMsg(gatherInfo()) }
+
 			case "up", "k":
-				// Skip past headers; if the next item above is a header,
-				// keep going until we find a selectable item or hit the top.
 				moved := false
 				for m.cursor > 0 {
 					next := m.cursor - 1
-					if m.menuItems[next].kind == kindHeader {
+					if items[next].kind == kindHeader {
 						above := next - 1
-						if above >= 0 && m.menuItems[above].kind != kindHeader {
+						if above >= 0 && items[above].kind != kindHeader {
 							m.cursor = above
 							moved = true
 						}
@@ -626,13 +776,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					moved = true
 					break
 				}
-				// If cursor didn't move (already at the first selectable
-				// item), scroll the menu to show the header above it.
 				if !moved && m.menuOfs > 0 {
 					m.menuOfs--
 				}
-				// Keep the cursor visible. Clamp offset so it never goes
-				// negative or beyond the last page.
 				if visible >= n {
 					m.menuOfs = 0
 				} else {
@@ -651,12 +797,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "down", "j":
 				for m.cursor < n-1 {
 					m.cursor++
-					if m.menuItems[m.cursor].kind != kindHeader {
+					if items[m.cursor].kind != kindHeader {
 						break
 					}
 				}
-				// Keep the cursor visible. Clamp offset so it never goes
-				// negative or beyond the last page.
 				if visible >= n {
 					m.menuOfs = 0
 				} else {
@@ -673,18 +817,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 
 			case "enter":
-				mi := m.menuItems[m.cursor]
-				switch mi.kind {
-				case kindRecipe:
-					return m, m.selectRecipe(mi.recipe, nil)
-				case kindExit:
-					return m, tea.Quit
+				if m.cursor >= 0 && m.cursor < n {
+					mi := items[m.cursor]
+					switch mi.kind {
+					case kindRecipe:
+						return m, m.selectRecipe(mi.recipe, nil)
+					case kindExit:
+						return m, tea.Quit
+					}
 				}
 
 			case "q", "ctrl+c":
 				return m, tea.Quit
 
 			case "esc":
+				if m.filterText != "" {
+					m.filterText = ""
+					m.filterInput.SetValue("")
+					m.cursor = 0
+					m.menuOfs = 0
+					return m, nil
+				}
 				return m, tea.Quit
 			}
 			return m, nil
@@ -713,11 +866,50 @@ func (m model) viewPanel(maxLines int) string {
 	return b.String()
 }
 
+// filteredItems returns the subset of menuItems matching the current filter.
+// Headers are included only when at least one recipe follows in the group.
+// When filter is empty, returns the full menuItems unchanged.
+func (m model) filteredItems() []menuItem {
+	if m.filterText == "" {
+		return m.menuItems
+	}
+	lower := strings.ToLower(m.filterText)
+	var out []menuItem
+	var pendingHeader *menuItem
+	for i := range m.menuItems {
+		mi := &m.menuItems[i]
+		switch mi.kind {
+		case kindHeader:
+			pendingHeader = mi
+		case kindRecipe:
+			if strings.Contains(strings.ToLower(mi.recipe.Name), lower) ||
+				strings.Contains(strings.ToLower(mi.recipe.Doc), lower) {
+				if pendingHeader != nil {
+					out = append(out, *pendingHeader)
+					pendingHeader = nil
+				}
+				out = append(out, *mi)
+			}
+		case kindExit:
+			if pendingHeader != nil {
+				out = append(out, *pendingHeader)
+				pendingHeader = nil
+			}
+			out = append(out, *mi)
+		}
+	}
+	if pendingHeader != nil {
+		out = append(out, *pendingHeader)
+	}
+	return out
+}
+
 func (m model) viewMenu() string {
+	items := m.filteredItems()
 	visible := m.menuHeight()
 	var b strings.Builder
-	for i := m.menuOfs; i < m.menuOfs+visible && i < len(m.menuItems); i++ {
-		mi := m.menuItems[i]
+	for i := m.menuOfs; i < m.menuOfs+visible && i < len(items); i++ {
+		mi := items[i]
 		sel := i == m.cursor
 		switch mi.kind {
 		case kindHeader:
@@ -741,6 +933,19 @@ func (m model) viewMenu() string {
 	return b.String()
 }
 
+// viewSummary renders OSC 9;10 summary lines accumulated during execution.
+func (m model) viewSummary() string {
+	if len(m.summaryLines) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n")
+	for _, line := range m.summaryLines {
+		b.WriteString(selStyle.Render("  "+line) + "\n")
+	}
+	return b.String()
+}
+
 // viewOverlay renders the CLI emulator as a bordered overlay box.
 func (m model) viewOverlay() string {
 	var content strings.Builder
@@ -759,6 +964,11 @@ func (m model) viewOverlay() string {
 		content.WriteString("\n" + strings.TrimRight(m.run.emu.Render(), "\n ") + "\n")
 	}
 
+	// Summary lines: explicit show, CLI cleared, or successful completion.
+	if m.showSummary || m.clsOutput || (m.state == stateDone && m.exitCode == 0) {
+		content.WriteString(m.viewSummary())
+	}
+
 	if m.spinOn {
 		content.WriteString(m.spin.View() + " " + docStyle.Render("waiting for progress...") + "\n")
 	}
@@ -773,9 +983,16 @@ func (m model) viewOverlay() string {
 	if m.cliMode {
 		content.WriteString(helpStyle.Render("ctrl+q kill"))
 	} else if m.state == stateRunning {
-		content.WriteString(helpStyle.Render("keys go to the recipe · ctrl+q kill"))
+		content.WriteString(helpStyle.Render("keys go to the recipe · ctrl+q kill · s save log"))
 	} else {
-		content.WriteString(helpStyle.Render("recipe finished · enter close · ↑/↓ navigate · q quit"))
+		hint := "enter close · s save log · q quit"
+		if m.exitCode != 0 {
+			hint = "recipe failed · s save log · enter close · q quit"
+		}
+		content.WriteString(helpStyle.Render(hint))
+		if m.lastSavedPath != "" {
+			content.WriteString("\n" + okStyle.Render("log saved: "+m.lastSavedPath))
+		}
 	}
 
 	return content.String()
@@ -807,6 +1024,11 @@ func (m model) viewOverlayWithConfirm() string {
 
 	if m.spinOn {
 		content.WriteString(m.spin.View() + " " + docStyle.Render("waiting for progress...") + "\n")
+	}
+
+	// Summary lines from OSC 9;10, shown above the confirm prompt.
+	if m.showSummary || m.clsOutput {
+		content.WriteString(m.viewSummary())
 	}
 
 	// Confirmation prompt and buttons, centred in the overlay,
@@ -860,6 +1082,11 @@ func (m model) viewOverlayWithPrompt() string {
 
 	if m.spinOn {
 		content.WriteString(m.spin.View() + " " + docStyle.Render("waiting for progress...") + "\n")
+	}
+
+	// Summary lines from OSC 9;10, shown above the prompt.
+	if m.showSummary || m.clsOutput {
+		content.WriteString(m.viewSummary())
 	}
 
 	// Prompt: styled label + input field, between CLI output and progress bar.
@@ -1112,8 +1339,16 @@ func (m model) View() string {
 			func(s lipgloss.Style) lipgloss.Style { return s.Padding(0, 1) })
 
 	default:
-		b.WriteString(m.viewMenu())
-		b.WriteString(helpStyle.Render("↑/↓ select · enter run · q quit"))
+		if m.loadError != "" {
+			b.WriteString(errStyle.Render("Error: "+m.loadError) + "\n")
+			b.WriteString(helpStyle.Render("r refresh · q quit"))
+		} else {
+			if m.filterVisible {
+				b.WriteString(m.filterInput.View() + "\n")
+			}
+			b.WriteString(m.viewMenu())
+			b.WriteString(helpStyle.Render("↑/↓ select · / filter · r refresh · q quit"))
+		}
 	}
 	return b.String()
 }
