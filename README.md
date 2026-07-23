@@ -95,13 +95,26 @@ setup-vpn:
 
 A full template demonstrating every pattern is at [`TEMPLATE.justfile`](TEMPLATE.justfile).
 
-## Building
+## Implementing into your bootc repo
 
-```bash
-CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o goojust .
+This package requires fastfetch to be included in the image.
+
+The following script can be added to your bootc image repo.
+
+The script installs the fastfetch dependancy then downloads, verifies and installs goojust: 
+
 ```
+dnf5 install -y just fastfetch
 
-A single static binary with no runtime dependencies. Releases publish a prebuilt `x86_64-unknown-linux-gnu` tarball with a `.sha256` sidecar.
+source /ctx/lib/fetch-helpers.sh
+
+fetch_extract "https://github.com/jayelg/goojust/releases/download/v${GOOJUST_VERSION}/goojust-v${GOOJUST_VERSION}-x86_64-linux-gnu.tar.gz" \
+    "$GOOJUST_SHA256" /tmp
+
+bash /tmp/install.sh
+
+rm -rf /tmp/goojust /tmp/install.sh /tmp/scripts/
+```
 
 ## License
 
